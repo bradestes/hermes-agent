@@ -17,6 +17,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
+    reviewer_home = home / "profiles" / "reviewer"
+    reviewer_home.mkdir(parents=True)
+    (reviewer_home / "config.yaml").write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     # Allow the kanban notifier path-validator to upload artifacts the

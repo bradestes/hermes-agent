@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from agent.turn_finalizer import _record_kanban_budget_exhausted
@@ -16,6 +17,9 @@ def test_stale_budget_receipt_cannot_mutate_newer_run(
 ) -> None:
     db_path = tmp_path / "kanban.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    reviewer_home = Path(os.environ["HERMES_HOME"]) / "profiles" / "reviewer"
+    reviewer_home.mkdir(parents=True)
+    (reviewer_home / "config.yaml").write_text("{}\n", encoding="utf-8")
 
     with kbc.connect(db_path) as conn:
         task_id = kb.create_task(conn, title="stale terminal receipt", assignee="builder")

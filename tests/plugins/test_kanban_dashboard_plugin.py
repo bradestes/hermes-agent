@@ -204,6 +204,11 @@ def test_task_detail_includes_links_and_events(client):
 # ---------------------------------------------------------------------------
 
 def test_patch_review_lifecycle_preserves_handoff_and_reopens(client):
+    from hermes_constants import get_hermes_home
+
+    reviewer_home = get_hermes_home() / "profiles" / "reviewer"
+    reviewer_home.mkdir(parents=True)
+    (reviewer_home / "config.yaml").write_text("{}\n", encoding="utf-8")
     secret = "ghp_" + "D" * 40
     task = client.post(
         "/api/plugins/kanban/tasks", json={"title": "review me", "assignee": "builder"},
@@ -613,6 +618,11 @@ def test_bulk_status_ready(client):
     assert {a["id"], b["id"], c2["id"]}.issubset(ids)
 
 def test_bulk_review_assignment_preserves_implementer_provenance(client):
+    from hermes_constants import get_hermes_home
+
+    reviewer_home = get_hermes_home() / "profiles" / "reviewer"
+    reviewer_home.mkdir(parents=True)
+    (reviewer_home / "config.yaml").write_text("{}\n", encoding="utf-8")
     tasks = [
         client.post(
             "/api/plugins/kanban/tasks",

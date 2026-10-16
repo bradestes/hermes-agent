@@ -39,6 +39,10 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolated HERMES_HOME with an empty kanban DB."""
     home = tmp_path / ".hermes"
     home.mkdir()
+    for profile in ("reviewer", "lead-reviewer", "reviewer-a"):
+        profile_home = home / "profiles" / profile
+        profile_home.mkdir(parents=True)
+        (profile_home / "config.yaml").write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
@@ -118,6 +122,34 @@ def test_request_review_transitions_running_to_review(kanban_home: Path) -> None
         # No block / triage events were emitted.
         assert _events(conn, tid, kind="blocked") == []
         assert _events(conn, tid, kind="block_loop_detected") == []
+
+
+def test_request_review_rejects_unknown_reviewer_without_mutation(kanban_home: Path) -> None:
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="invalid review route", assignee="worker")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        before = kb.get_task(conn, tid)
+        before_events = kb.list_events(conn, tid)
+
+        ok, reason = kb.request_review(
+            conn,
+            tid,
+            summary="Implementation complete",
+            reviewer="profile-that-does-not-exist",
+            expected_run_id=claimed.current_run_id,
+            with_reason=True,
+        )
+
+        assert ok is False
+        assert reason == "reviewer profile 'profile-that-does-not-exist' is not installed"
+        after = kb.get_task(conn, tid)
+        assert (after.status, after.assignee, after.current_run_id) == (
+            before.status,
+            before.assignee,
+            before.current_run_id,
+        )
+        assert kb.list_events(conn, tid) == before_events
 
 
 # ---------------------------------------------------------------------------

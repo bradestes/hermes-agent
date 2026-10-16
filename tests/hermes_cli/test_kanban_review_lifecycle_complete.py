@@ -23,7 +23,13 @@ from hermes_cli import kanban_diagnostics as kd
 
 
 @pytest.fixture
-def conn(tmp_path: Path):
+def conn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / ".hermes"
+    reviewer_home = home / "profiles" / "reviewer"
+    reviewer_home.mkdir(parents=True)
+    (reviewer_home / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     db = kbc.connect(tmp_path / "kanban.db")
     try:
         yield db

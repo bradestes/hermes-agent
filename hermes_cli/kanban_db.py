@@ -3320,6 +3320,11 @@ def request_review(
                         "malformed); pass reviewer= explicitly",
                     )
             reviewer = _canonical_assignee(reviewer)
+            if reviewer is not None:
+                from hermes_cli.profiles import profile_exists
+
+                if not profile_exists(reviewer):
+                    return _ret(False, f"reviewer profile {reviewer!r} is not installed")
             # The actor is the run that did the work. ``assignee`` is the actor
             # only while a worker holds the card; on a never-claimed card it is
             # whoever the operator assigned -- possibly the reviewer itself,
