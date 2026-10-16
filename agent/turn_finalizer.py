@@ -51,14 +51,14 @@ def _record_kanban_budget_exhausted(
     """Record a terminal ``timed_out`` outcome for a kanban worker out of budget.
 
     Routed via ``_record_task_failure`` (not ``kanban_block``) so it counts toward the
-    consecutive-failure circuit breaker. Idempotent via the ``_end_run`` CAS
-    (``WHERE ended_at IS NULL``), so safe from multiple exit paths.
+    consecutive-failure circuit breaker. The dispatcher-pinned run id fences the
+    receipt before any mutation, so a superseded worker cannot close a newer run.
 
-    This is a bounded fallback (#87096): the CAS invariant in ``_end_run`` (``WHERE ended_at IS NULL``)
-    guarantees idempotence — if another path already closed the run this is a no-op — so it is safe to call
-    from multiple exit paths.
+    This is a bounded fallback (#87096): duplicate or late receipts carry the
+    same run id and become no-ops once that run no longer owns the task.
     """
     try:
+        expected_run_id = int(os.environ["HERMES_KANBAN_RUN_ID"])
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
         from hermes_cli import kanban_db_dispatch as _kbd
@@ -72,6 +72,7 @@ def _record_kanban_budget_exhausted(
                     "task could not complete within the allowed iterations"
                 ),
                 outcome="timed_out",
+                expected_run_id=expected_run_id,
                 release_claim=True,
                 end_run=True,
                 event_payload_extra={"budget_used": api_call_count, "budget_max": max_iterations},

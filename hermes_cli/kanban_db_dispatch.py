@@ -1375,6 +1375,7 @@ def _record_task_failure(
     error: str,
     *,
     outcome: str,
+    expected_run_id: int | None = None,
     failure_limit: int | None = None,
     force_trip: bool = False,
     release_claim: bool = False,
@@ -1385,6 +1386,10 @@ def _record_task_failure(
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
     consistent. Returns True when the task was auto-blocked.
+
+    ``expected_run_id`` fences worker-originated terminal receipts to the run
+    that produced them. A superseded run is a no-op before any task, run, or
+    event mutation; dispatcher-owned accounting may omit the fence.
 
     ``release_claim=True, end_run=True``: spawn-failure path (task still
     running with an open run — restore source phase or ``blocked``, release
@@ -1409,6 +1414,8 @@ def _record_task_failure(
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
+            return False
+        if expected_run_id is not None and row["current_run_id"] != int(expected_run_id):
             return False
         retry_status = (
             _kb._retry_status_for_run(conn, task_id, row["current_run_id"])

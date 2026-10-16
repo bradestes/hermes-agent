@@ -168,6 +168,7 @@ def test_pending_response_does_not_mask_later_terminal_exit(
 def test_pending_response_records_kanban_timeout(monkeypatch):
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-123")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "123")
     record = MagicMock(name="record_task_failure")
     conn = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
@@ -187,6 +188,7 @@ def test_pending_response_records_kanban_timeout(monkeypatch):
         "task-123",
         error=ANY,
         outcome="timed_out",
+        expected_run_id=123,
         release_claim=True,
         end_run=True,
         event_payload_extra={"budget_used": 60, "budget_max": 60},
@@ -239,6 +241,7 @@ def test_bounded_fallback_records_kanban_failure_when_interrupted(monkeypatch):
     """
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-456")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "456")
     record = MagicMock(name="record_task_failure")
     conn = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
@@ -268,6 +271,7 @@ def test_bounded_fallback_records_kanban_failure_when_interrupted(monkeypatch):
     args, kwargs = record.call_args
     assert args[1] == "task-456"
     assert kwargs["outcome"] == "timed_out"
+    assert kwargs["expected_run_id"] == 456
     assert kwargs["release_claim"] is True
     assert kwargs["end_run"] is True
     assert kwargs["event_payload_extra"]["budget_used"] == 60
@@ -280,6 +284,7 @@ def test_bounded_fallback_records_kanban_failure_when_failed(monkeypatch):
     """
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-789")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "789")
     record = MagicMock(name="record_task_failure")
     conn = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
@@ -306,6 +311,7 @@ def test_bounded_fallback_records_kanban_failure_when_failed(monkeypatch):
     args, kwargs = record.call_args
     assert args[1] == "task-789"
     assert kwargs["outcome"] == "timed_out"
+    assert kwargs["expected_run_id"] == 789
 
 
 def test_bounded_fallback_does_not_fire_without_kanban_task(monkeypatch):
