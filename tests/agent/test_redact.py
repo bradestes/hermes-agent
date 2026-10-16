@@ -521,6 +521,49 @@ class TestPythonReprFields:
         assert secret not in result
         assert "'SERVICE_TOKEN': \"***\"" in result
 
+    @pytest.mark.parametrize(
+        "key_quote, value_quote",
+        [("'", "'"), ("'", '"'), ('"', "'"), ('"', '"')],
+    )
+    def test_quoted_mapping_key_and_value_are_redacted_without_changing_quotes(
+            self, key_quote, value_quote):
+        secret = "opaque-authorization-value-1234567890"
+        text = f"{{{key_quote}Authorization{key_quote}: {value_quote}{secret}{value_quote}}}"
+
+        result = redact_sensitive_text(text, force=True)
+
+        assert secret not in result
+        assert result == f"{{{key_quote}Authorization{key_quote}: {value_quote}***{value_quote}}}"
+
+    def test_redacted_prefix_does_not_exempt_raw_mapping_secret(self):
+        secret = "«redacted-raw-opaque-secret-1234567890"
+        cases = [
+            ("API_KEY=" + secret, "API_KEY=***"),
+            ('{"api_' + 'key": "' + secret + '"}', '{"api_key": "***"}'),
+            ("{'Author" + "ization': '" + secret + "'}", "{'Authorization': '***'}"),
+        ]
+
+        for text, expected in cases:
+            result = redact_sensitive_text(text, force=True)
+            assert secret not in result
+            assert result == expected
+
+    @pytest.mark.parametrize(
+        "secret",
+        ["prefix***still-secret-1234567890", "«redacted:still-secret-1234567890"],
+    )
+    def test_mask_marker_fragments_do_not_exempt_raw_assignment_secret(self, secret):
+        cases = [
+            "API_KEY=" + secret,
+            '{"api_' + 'key": "' + secret + '"}',
+            "{'Author" + "ization': '" + secret + "'}",
+        ]
+
+        for text in cases:
+            result = redact_sensitive_text(text, force=True)
+            assert secret not in result
+            assert result != text
+
     def test_programmatic_env_lookup_is_preserved(self):
         text = "{'API_KEY': \"os.getenv('OPENAI_API_KEY')\"}"
         assert redact_sensitive_text(text, force=True) == text

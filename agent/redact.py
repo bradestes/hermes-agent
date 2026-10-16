@@ -461,6 +461,15 @@ def _looks_like_opaque_credential(value: str) -> bool:
 _CONFIG_LITERAL_VALUES = frozenset({"true", "false", "yes", "no", "on", "off", "null", "none"})
 
 
+def _is_redacted_assignment_value(value: str) -> bool:
+    """Whether ``value`` is a mask emitted by one of the redaction passes."""
+    if value in {"***", "«redacted-secret»", "«redacted-vault-secret»"}:
+        return True
+    if re.fullmatch(r"«redacted:[A-Za-z0-9_-]+…»", value):
+        return True
+    return re.fullmatch(r"[A-Za-z][A-Za-z0-9._~-]* \*\*\*", value) is not None
+
+
 def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> bool:
     """Shared gate for the ENV / JSON / YAML assignment passes: skip programmatic env
     lookups used as values, optionally require a word-bounded keyword in the key,
@@ -473,10 +482,10 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
     # a code snippet, not a leaked secret value.
     if _ENV_LOOKUP_VALUE_RE.match(value):
         return False
-    # An earlier pass already masked this value (``***`` or the ``«redacted:…»`` sentinel). Masking it
-    # again only erases what the sentinel deliberately kept — the vendor label (``Digest ***`` →
-    # ``***``, ``«redacted:ghp_…»`` → ``«redacted-secret»``). Same guard _redact_python_repr_fields uses.
-    if value == "***" or value.startswith("«redacted"):
+    # An earlier pass already masked this entire value. Masking it again only erases what the sentinel
+    # deliberately kept — the scheme or vendor label (``Digest ***`` → ``***``,
+    # ``«redacted:ghp_…»`` → ``«redacted-secret»``). Marker fragments inside a larger value are not masks.
+    if _is_redacted_assignment_value(value):
         return False
     # ``redact_secrets: true`` is configuration state, not a credential: masking a boolean/null
     # literal under a secret-named key corrupts the config view the agent copies back (#142574).
@@ -532,10 +541,9 @@ _JSON_ANY_KEY_FIELD_ESCAPED_RE = re.compile(
     r'((\\++)"([A-Za-z0-9_.\-]{1,128}+)\2")\s*+:\s*+\2"([^"\\\n]++)\2"')
 _JSON_KEY_NAMES_FULL_RE = re.compile(_JSON_KEY_NAMES, re.IGNORECASE)
 
-# Python ``repr`` uses single-quoted mapping fields, so opaque credentials in
-# tracebacks and pytest failure introspection bypass the double-quoted JSON rule
-# above: ``{'BRAVE_API_KEY': 'opaque-value'}``. Capture identifier-shaped keys
-# here, then apply the canonical high-confidence key policy in the callback.
+# Mapping diagnostics can use Python's single quotes or JSON's double quotes.
+# Capture identifier-shaped keys here, then apply the canonical high-confidence
+# key policy in the callback.
 _PYTHON_REPR_SECRET_KEYS = frozenset({
     "access_token",
     "refresh_token",
@@ -582,7 +590,7 @@ _PYTHON_REPR_CREDENTIAL_SUFFIXES = (
     "credentials",
 )
 _PYTHON_REPR_FIELD_RE = re.compile(
-    r"'(?P<key>[A-Za-z_][A-Za-z0-9_]*)'(?P<sep>\s*:\s*)"
+    r"(?P<key_quote>['\"])(?P<key>[A-Za-z_][A-Za-z0-9_]*)(?P=key_quote)(?P<sep>\s*:\s*)"
     r"(?:"
     r"(?P<single_prefix>[bB]?)'(?P<single_value>(?:\\.|[^'\\])+)'"
     r"|(?P<double_prefix>[bB]?)\"(?P<double_value>(?:\\.|[^\"\\])+)\""
@@ -1138,15 +1146,21 @@ def _redact_python_repr_fields(text: str) -> str:
         # programmatic env lookups just like the ENV/JSON/YAML passes do.
         if _ENV_LOOKUP_VALUE_RE.match(value):
             return match.group(0)
+        # Double-quoted fields share the JSON assignment surface, including its
+        # value-shape guard for ambiguous names such as ``token`` and ``key``.
+        if match.group("key_quote") == '"' and not _should_redact_assignment(
+                key, value, check_keyword=False):
+            return match.group(0)
         # An upstream pass (MCP probe header scrub, _mask_token) already masked this
         # value; re-masking would erase the scheme word it deliberately kept
         # (``'Authorization': 'Digest ***'`` → ``'***'``).
-        if "***" in value or value.startswith("«redacted:"):
+        if _is_redacted_assignment_value(value):
             return match.group(0)
         # Do not retain head/tail characters here: escaped repr atoms can cross
         # a slicing boundary and leave an unescaped quote behind. A full mask is
         # parseable for both str and bytes values and leaks no opaque bytes.
-        return f"'{key}'{match.group('sep')}{prefix}{quote}***{quote}"
+        key_quote = match.group("key_quote")
+        return f"{key_quote}{key}{key_quote}{match.group('sep')}{prefix}{quote}***{quote}"
 
     return _PYTHON_REPR_FIELD_RE.sub(_sub, text)
 
@@ -1392,9 +1406,9 @@ def _redact_assignments(text: str, *, mask_nonreusable: bool = False) -> str:
         if '\\"' in text:
             text = _JSON_ANY_KEY_FIELD_ESCAPED_RE.sub(lambda m: _redact_json_affixed_key_escaped(m, mask), text)
 
-    # Python mapping repr fields ({'API_KEY': '…'}): single-quoted, so the JSON rule
-    # above never sees them — the traceback / pytest-introspection leak shape.
-    if ":" in text and "'" in text:
+    # Mapping fields missed by the narrower JSON-name rule, including Python
+    # reprs and JSON-style high-confidence keys such as ``Authorization``.
+    if ":" in text and ("'" in text or '"' in text):
         text = _redact_python_repr_fields(text)
 
     # YAML after JSON; unwrap scalars before the shared assignment gate so
