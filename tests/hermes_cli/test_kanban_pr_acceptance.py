@@ -20,11 +20,22 @@ def github(tmp_path, monkeypatch):
             state["requests"].append(self.path)
             sha = state["head"]
             if self.path == "/graphql":
+                required = [] if state.get("no_required") else [
+                    {"context": "required", "app": {"databaseId": 1}}]
                 value = {"data": {"repository": {"pullRequest": {
                     "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
-                    "baseRef": {"branchProtectionRule": {"requiredStatusChecks": [
-                        {"context": "required", "app": {"databaseId": 1}}]}}}}}}
+                    "baseRef": {"branchProtectionRule": {"requiredStatusChecks": required}}}}}}
             elif "/rules/branches/" in self.path:
+                if state.get("rules_plan_denied") or state.get("rules_auth_denied"):
+                    self.send_response(403)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "message": (
+                            "Upgrade to GitHub Pro or make this repository public to enable this feature."
+                            if state.get("rules_plan_denied") else "Resource not accessible by integration"
+                        )
+                    }).encode())
+                    return
                 value = [[]]
             elif "/check-runs" in self.path:
                 run = {"id": 42, "name": "required", "head_sha": sha,
@@ -60,9 +71,14 @@ def github(tmp_path, monkeypatch):
     shim = tmp_path / "bin"
     shim.mkdir()
     gh = shim / "gh"
-    gh.write_text(f"#!{sys.executable}\nimport sys,urllib.request\n"
+    gh.write_text(f"#!{sys.executable}\nimport sys,urllib.error,urllib.request\n"
                   f"u='http://127.0.0.1:{server.server_port}/'+sys.argv[2]\n"
-                  "print(urllib.request.urlopen(u).read().decode())\n")
+                  "try:\n"
+                  " print(urllib.request.urlopen(u).read().decode())\n"
+                  "except urllib.error.HTTPError as exc:\n"
+                  " print(exc.read().decode(), file=sys.stderr)\n"
+                  " print(f'HTTP {exc.code}', file=sys.stderr)\n"
+                  " raise SystemExit(1)\n")
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -107,6 +123,68 @@ def test_pr_completion_requires_current_required_evidence(github):
         local = kb.create_task(conn, title="local", completion_contract="local-only")
         assert kb.complete_task(conn, local, summary="https://github.com/acme/repo/pull/7 is background context")
         assert len(github["requests"]) == before
+
+
+@pytest.mark.platforms("linux")
+def test_plan_inaccessible_rules_fall_back_to_branch_protection_and_exact_pr(github):
+    """A plan-gated rules endpoint is not an auth failure. With no required checks
+    visible through branch protection, exact head/base/state revalidation permits
+    completion; unrelated 403 responses must remain auth failures."""
+    github.update(no_required=True, rules_plan_denied=True)
+    with connect() as conn:
+        tid = kb.create_task(conn, title="plan gate", completion_contract="acme/repo")
+        assert kb.complete_task(
+            conn,
+            tid,
+            result="done",
+            metadata={"published_pr": "https://github.com/acme/repo/pull/7"},
+        )
+        receipt = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)
+        ).fetchone()[0])
+    assert receipt["classification"] == "success"
+    assert receipt["head_sha"] == "a" * 40
+    assert receipt["required"] == []
+    assert receipt["checks"] == []
+    assert receipt["rules_metadata"] == "plan-unavailable"
+    assert "/repos/acme/repo/pulls/7" in github["requests"]
+
+
+@pytest.mark.platforms("linux")
+def test_rules_403_without_plan_gate_message_remains_auth_failure(github):
+    github.update(rules_auth_denied=True)
+    with connect() as conn:
+        tid = kb.create_task(conn, title="auth gate", completion_contract="acme/repo")
+        assert not kb.complete_task(
+            conn,
+            tid,
+            result="done",
+            metadata={"published_pr": "https://github.com/acme/repo/pull/7"},
+        )
+        receipt = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)
+        ).fetchone()[0])
+    assert receipt["classification"] == "auth"
+    assert "rules_metadata" not in receipt
+
+
+@pytest.mark.platforms("linux")
+def test_plan_inaccessible_rules_do_not_bypass_branch_protection_checks(github):
+    github.update(rules_plan_denied=True, conclusion="failure")
+    with connect() as conn:
+        tid = kb.create_task(conn, title="required check", completion_contract="acme/repo")
+        assert not kb.complete_task(
+            conn,
+            tid,
+            result="done",
+            metadata={"published_pr": "https://github.com/acme/repo/pull/7"},
+        )
+        receipt = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)
+        ).fetchone()[0])
+    assert receipt["classification"] == "failure"
+    assert receipt["checks"][0]["name"] == "required"
+    assert receipt["checks"][0]["head_sha"] == "a" * 40
 
 
 @pytest.mark.platforms("linux")

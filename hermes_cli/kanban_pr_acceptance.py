@@ -40,6 +40,17 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
                                 text=True, encoding="utf-8", errors="replace", timeout=30,
                                 check=True, env=_gh_env(profile_home))
     except subprocess.CalledProcessError as exc:
+        if (_is_rules_endpoint(endpoint)
+                and re.search(
+                    r"upgrade to github pro or make this repository public to enable this feature",
+                    exc.stderr or "",
+                    re.IGNORECASE,
+                )):
+            # Private repositories on plans without rulesets return HTTP 403 even
+            # to an otherwise authorized login. This says nothing about whether
+            # the profile can read the repository; keep the fallback narrowly
+            # tied to GitHub's documented plan-gate response.
+            raise _RulesMetadataUnavailable("repository rules are unavailable on this plan") from None
         # 401/403/404 = the login cannot see this repository (wrong profile identity
         # or missing grant), not a transient API failure. Persist only the status
         # code + endpoint, never gh's stderr (credentials/host details).
@@ -59,6 +70,17 @@ class _GateAuthError(RuntimeError):
     """gh was refused at HTTP 401/403/404 (or GraphQL returned no repository):
     this profile's login cannot see the repo — an identity problem to fix, not
     an infrastructure blip to retry."""
+
+
+class _RulesMetadataUnavailable(RuntimeError):
+    """The authenticated repository is readable, but its plan hides rulesets."""
+
+
+def _is_rules_endpoint(endpoint: str) -> bool:
+    return bool(re.fullmatch(
+        r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/rules/branches/[^?]+(?:\?.*)?",
+        endpoint,
+    ))
 
 
 # Every key gh can read a login from, github.com and GitHub Enterprise alike. All of them are
@@ -164,49 +186,60 @@ def collect_acceptance(contract: str, published_pr: str | None,
             raise ValueError("PR is closed or current head is unavailable")
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
         required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
-                     paginate=True, profile_home=profile_home)
+        rules_unavailable = False
+        try:
+            rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
+                         paginate=True, profile_home=profile_home)
+        except _RulesMetadataUnavailable:
+            rules_unavailable = True
+            rules = []
         for page in rules:
             for rule in page:
                 if rule["type"] == "required_status_checks":
                     required.update((r["context"], r.get("integration_id"))
                                     for r in rule["parameters"]["required_status_checks"])
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
-        if not required:
+        if not required and not rules_unavailable:
             receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
             return receipt
-        pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
-                     paginate=True, profile_home=profile_home)
-        runs = [run for page in pages for run in page["check_runs"]]
-        if len({r["id"] for r in runs}) != pages[0]["total_count"]:
-            raise ValueError("Incomplete check-run pagination")
-        statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
-                                                       paginate=True, profile_home=profile_home) for s in page]
         outcomes = []
-        for context, app_id in sorted(required, key=str):
-            matching = [r for r in runs if r["name"] == context and
-                        (app_id in (None, -1) or r["app"]["id"] == app_id)]
-            # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
-            legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
-            selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
-            if not selected:
-                outcomes.append("missing")
-                receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
-            for check in selected:
-                is_run = "conclusion" in check
-                outcome = check.get("conclusion") if is_run else check["state"]
-                classification = _classify(check, sha, outcome, is_run)
-                outcomes.append(classification)
-                receipt["checks"].append({"name": context, "id": check["id"],
-                    "url": check.get("html_url") or check.get("target_url"),
-                    "head_sha": check.get("head_sha", check.get("sha")),
-                    "classification": classification, "conclusion": outcome})
+        if required:
+            pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
+                         paginate=True, profile_home=profile_home)
+            runs = [run for page in pages for run in page["check_runs"]]
+            if len({r["id"] for r in runs}) != pages[0]["total_count"]:
+                raise ValueError("Incomplete check-run pagination")
+            statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
+                                                           paginate=True, profile_home=profile_home) for s in page]
+            for context, app_id in sorted(required, key=str):
+                matching = [r for r in runs if r["name"] == context and
+                            (app_id in (None, -1) or r["app"]["id"] == app_id)]
+                # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
+                legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
+                selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
+                if not selected:
+                    outcomes.append("missing")
+                    receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
+                for check in selected:
+                    is_run = "conclusion" in check
+                    outcome = check.get("conclusion") if is_run else check["state"]
+                    classification = _classify(check, sha, outcome, is_run)
+                    outcomes.append(classification)
+                    receipt["checks"].append({"name": context, "id": check["id"],
+                        "url": check.get("html_url") or check.get("target_url"),
+                        "head_sha": check.get("head_sha", check.get("sha")),
+                        "classification": classification, "conclusion": outcome})
         # Re-read after all pages: old-head successes are never transferable.
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
         if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
-        receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
+        receipt["classification"] = (
+            next((x for x in outcomes if x != "success"), "success")
+            if outcomes else "success" if rules_unavailable else "missing"
+        )
+        if rules_unavailable:
+            receipt["rules_metadata"] = "plan-unavailable"
         receipt["ok"] = receipt["classification"] == "success"
         return receipt
     except _GateAuthError as exc:
