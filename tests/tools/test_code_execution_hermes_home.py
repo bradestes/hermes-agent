@@ -46,10 +46,13 @@ class TestMultiplexedHermesHome:
         """The reported bug: a child must see the ACTIVE profile's home, not the server default,
         and sequential turns for different profiles each see their own."""
         monkeypatch.setenv("HERMES_HOME", "/machine/default/.hermes")
+        monkeypatch.setenv("HERMES_PROFILE", "default")
         alpha = home_override(tmp_path / "profiles" / "alpha")
         assert _child_env()["HERMES_HOME"] == alpha
+        assert _child_env()["HERMES_PROFILE"] == "alpha"
         beta = home_override(tmp_path / "profiles" / "beta")
         assert _child_env()["HERMES_HOME"] == beta
+        assert _child_env()["HERMES_PROFILE"] == "beta"
 
     def test_no_override_leaves_inherited_value_untouched(self, monkeypatch):
         """Dedicated per-profile processes (no override): zero behavior change."""

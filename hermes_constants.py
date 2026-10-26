@@ -396,6 +396,22 @@ def profile_name_for_home(path: str | Path | None) -> str | None:
     return None
 
 
+def apply_subprocess_profile_env(env: MutableMapping[str, str]) -> None:
+    """Pin a child's profile identity to the active Hermes home.
+
+    A multiplexed host's process environment names its launch profile, while the
+    ContextVar override names the profile the current turn runs for. Child
+    processes cannot inherit that ContextVar, so resolve it before spawning.
+    """
+    override = get_hermes_home_override()
+    home = override or env.get("HERMES_HOME") or os.getenv("HERMES_HOME")
+    profile = profile_name_for_home(home)
+    if profile:
+        env["HERMES_PROFILE"] = profile
+    elif override:
+        env.pop("HERMES_PROFILE", None)
+
+
 def profile_tombstone_path(profile_home: Path) -> Path:
     return profile_home.parent / _DELETED_PROFILES_DIR / profile_home.name
 

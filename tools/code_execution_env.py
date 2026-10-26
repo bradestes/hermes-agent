@@ -122,7 +122,9 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None, toolchain
 def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
                      child_python: str) -> dict[str, str]:
     """Build the scrubbed child environment both execution paths share."""
-    from hermes_constants import apply_scratch_tmp_env, apply_subprocess_home_env, get_hermes_home_override
+    from hermes_constants import (
+        apply_scratch_tmp_env, apply_subprocess_home_env, apply_subprocess_profile_env,
+        get_hermes_home_override)
     from agent.session_client_env import tool_env, toolchain_environ
     # A local session's client toolchain replaces the daemon's PATH / venv, then the whole scrub (secret
     # names, delegated-child restrictions) runs over the merged environment.
@@ -154,6 +156,7 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     if _home_override:
         child_env["HERMES_HOME"] = _home_override
         apply_scratch_tmp_env(child_env)  # TMPDIR follows the routed home, like HOME does
+    apply_subprocess_profile_env(child_env)
     # PYTHONPATH: the staging dir (hermes_tools.py) must always be importable even when project
     # mode changes CWD. Hermes's root is added ONLY when the child runs in Hermes's Python env —
     # exposing Hermes's site-packages to an external interpreter can mix incompatible compiled

@@ -237,12 +237,14 @@ def _resolve_safe_cwd(cwd: str) -> str:
 # --- Child-process environment construction ---
 def _apply_profile_home(env: dict) -> None:
     """Bridge the context-local HERMES_HOME override, then the subprocess HOME contract."""
-    from hermes_constants import apply_subprocess_home_env, get_hermes_home_override
+    from hermes_constants import (
+        apply_subprocess_home_env, apply_subprocess_profile_env, get_hermes_home_override)
     try:
         if value := get_hermes_home_override():
             env["HERMES_HOME"] = value
     except Exception:
         pass
+    apply_subprocess_profile_env(env)
     apply_subprocess_home_env(env)
 
 

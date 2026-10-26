@@ -21,12 +21,13 @@ def test_factory_child_policy_and_profile_home(child_env, monkeypatch, scrub, in
     try:
         env = build_subprocess_env(scrub_secrets=scrub, inherit_profile_home=inherit_home,
                                    extra={"MY_HARMLESS_VAR": "caller", "ANTHROPIC_API_KEY": "fake-extra"})
-        result = observe_child(env, ["HERMES_HOME", "ANTHROPIC_API_KEY", "AUXILIARY_FAKE_API_KEY",
+        result = observe_child(env, ["HERMES_HOME", "HERMES_PROFILE", "ANTHROPIC_API_KEY", "AUXILIARY_FAKE_API_KEY",
                                      "GATEWAY_RELAY_FOO_TOKEN", "MY_HARMLESS_VAR"])
     finally:
         reset_hermes_home_override(token)
     assert result == {
         "HERMES_HOME": str(routed) if scrub or inherit_home else before["HERMES_HOME"],
+        "HERMES_PROFILE": "coder" if scrub or inherit_home else before.get("HERMES_PROFILE"),
         "ANTHROPIC_API_KEY": None if scrub else "fake-extra",
         "AUXILIARY_FAKE_API_KEY": None if scrub else "fake-auxiliary",
         "GATEWAY_RELAY_FOO_TOKEN": None if scrub else "fake-relay", "MY_HARMLESS_VAR": "caller",
