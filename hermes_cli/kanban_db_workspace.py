@@ -402,7 +402,14 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # See #28818. Containment runs first so an unmanaged dir that is
             # never removed does not pay for (or log) the shared-use scan.
             if _is_managed_scratch_path(wp):
-                if not _defer_shared_workspace_cleanup(conn, task_id, path):
+                # A worker can turn its initially-empty scratch directory into
+                # a linked Git worktree.  Treat the checkout by what it is on
+                # disk rather than rmtree'ing uncommitted changes merely
+                # because the task row still says ``scratch``.
+                if _is_linked_worktree_checkout(wp):
+                    if not _defer_shared_worktree_cleanup(conn, task_id, path):
+                        _cleanup_worktree_workspace(task_id, path, row["branch_name"])
+                elif not _defer_shared_workspace_cleanup(conn, task_id, path):
                     release_lsp_clients(str(wp))
                     shutil.rmtree(wp, ignore_errors=True)
                     _kb._log.debug("Removed scratch workspace: %s", wp)
@@ -528,11 +535,16 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             if not wp.is_dir():
                 continue
             if _is_managed_scratch_path(wp):
-                if _defer_shared_workspace_cleanup(conn, parent_id, ws_path):
-                    continue
-                release_lsp_clients(str(wp))
-                shutil.rmtree(wp, ignore_errors=True)
-                _kb._log.debug("Deferred cleanup: removed parent %s scratch workspace: %s", parent_id, wp)
+                if _is_linked_worktree_checkout(wp):
+                    if _defer_shared_worktree_cleanup(conn, parent_id, ws_path):
+                        continue
+                    _cleanup_worktree_workspace(parent_id, ws_path, row["branch_name"])
+                else:
+                    if _defer_shared_workspace_cleanup(conn, parent_id, ws_path):
+                        continue
+                    release_lsp_clients(str(wp))
+                    shutil.rmtree(wp, ignore_errors=True)
+                    _kb._log.debug("Deferred cleanup: removed parent %s scratch workspace: %s", parent_id, wp)
     except Exception:
         pass  # best-effort
 

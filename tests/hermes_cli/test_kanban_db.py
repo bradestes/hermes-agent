@@ -850,6 +850,40 @@ def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
     ]
 
 
+def test_complete_task_preserves_dirty_git_worktree_created_inside_scratch(
+    kanban_home, tmp_path
+):
+    """A worker-created linked worktree must get Git's dirty-work safety even
+    when the task was originally dispatched with ``workspace_kind=scratch``."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="code in scratch")
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        workspace = kbw.resolve_workspace(task)
+        workspace.rmdir()
+        subprocess.run(
+            [
+                "git", "-C", str(repo), "worktree", "add", "-b",
+                "feature/scratch-worktree", str(workspace), "HEAD",
+            ],
+            check=True, capture_output=True, text=True,
+        )
+        kbw.set_workspace_path(conn, task_id, workspace)
+        (workspace / "uncommitted.txt").write_text("preserve me\n", encoding="utf-8")
+
+        assert kb.complete_task(conn, task_id, result="claimed complete")
+
+    assert workspace.is_dir()
+    assert (workspace / "uncommitted.txt").read_text(encoding="utf-8") == "preserve me\n"
+    status = subprocess.run(
+        ["git", "-C", str(workspace), "status", "--short"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert status == "?? uncommitted.txt\n"
+
+
 def test_review_bound_handoff_preserves_declared_artifacts(kanban_home):
     """A review-bound card's declared files must outlive the reviewer's
     completion — that completion is what cleans the scratch workspace up."""
