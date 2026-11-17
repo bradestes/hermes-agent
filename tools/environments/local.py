@@ -354,7 +354,13 @@ def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
     # already applies this invariant; Cron scripts use this sanitizer directly (#92998).
     if path_key is not None:
         out[path_key] = _prepend_hermes_bin_dir(fix_path(out.get(path_key, "")))
-    return _finalize_child_env(out)
+    out = _finalize_child_env(out)
+    # A dispatcher may grant an exact task a narrow set of profile secrets.
+    # Restore those values only after the normal fence has scrubbed the broad
+    # profile environment. Delegate children fail the ownership check inside
+    # this helper and receive none of the grant.
+    from hermes_cli.kanban_task_secrets import restore_task_secret_env_for_child
+    return restore_task_secret_env_for_child(out)
 
 
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:

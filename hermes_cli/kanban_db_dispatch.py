@@ -2744,6 +2744,14 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # assignee's secrets, which replace values but never remove one (kanban_worker_env).
     if routed:
         env = worker_client_env(env, profile_home)
+    # Task-scoped credentials are resolved only while the assignee's profile
+    # home and secret scope are bound. Config stores names, never values.
+    if profile_home:
+        from hermes_cli.config import load_config
+        from hermes_cli.kanban_task_secrets import inject_task_secret_env
+
+        with _worker_profile_scope(profile_home):
+            inject_task_secret_env(env, task.id, load_config())
     # The dispatcher is detached from every conversation; its worker must never
     # inherit routing mirrored by a previous gateway turn.
     from gateway.session_context import _VAR_MAP
