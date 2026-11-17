@@ -12,6 +12,7 @@ import contextlib
 import contextvars
 import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -32,6 +33,61 @@ if TYPE_CHECKING:
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("cron.scheduler")
+
+_SCRIPT_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SCRIPT_ENV_PROCESS_CONTROL_EXACT = frozenset({
+    "BASHOPTS", "BASH_ENV", "BWS_ACCESS_TOKEN", "CDPATH", "ENV", "GCONV_PATH",
+    "GLOBIGNORE", "IFS", "NODE_OPTIONS", "NODE_PATH", "NLSPATH", "PERL5OPT", "PERLLIB",
+    "PROMPT_COMMAND", "RUBYLIB", "RUBYOPT", "SHELLOPTS",
+})
+_SCRIPT_ENV_PROCESS_CONTROL_PREFIXES = ("BASH_FUNC_", "DYLD_", "LD_", "PYTHON")
+
+
+def _script_env_name_is_protected(name: str) -> bool:
+    """True for names that can redirect or reconfigure the script child itself."""
+    from agent.secret_scope import _is_global_env
+
+    upper = name.upper()
+    return (
+        _is_global_env(upper)
+        or upper in _SCRIPT_ENV_PROCESS_CONTROL_EXACT
+        or upper.startswith(_SCRIPT_ENV_PROCESS_CONTROL_PREFIXES)
+    )
+
+
+def _declared_script_env(names) -> dict[str, str]:
+    """Resolve a cron job's exact external-secret lease for its script child.
+
+    Cron scripts receive a scrubbed environment by default.  ``script_env`` is the narrow
+    exception for an owner-controlled job that explicitly declares which external-secret
+    source names its installed script needs.  Values come from the bound profile scope (never
+    a sibling profile), and only names recorded by the active external source are eligible.
+    """
+    if names is None:
+        return {}
+    if not isinstance(names, list):
+        raise ValueError("script_env must be a list of environment-variable names")
+
+    from agent.secret_scope import current_secret_scope_home, get_secret
+    from hermes_cli.env_loader import get_secret_source_values
+    from hermes_constants import get_hermes_home
+
+    profile_home = current_secret_scope_home() or str(get_hermes_home())
+    source_names = frozenset(get_secret_source_values(profile_home))
+    overlay: dict[str, str] = {}
+    for raw_name in names:
+        if not isinstance(raw_name, str) or not _SCRIPT_ENV_NAME_RE.fullmatch(raw_name):
+            raise ValueError("script_env contains an invalid environment-variable name")
+        name = raw_name
+        if _script_env_name_is_protected(name):
+            raise ValueError(f"script_env may not lease protected runtime variable {name}")
+        if name not in source_names:
+            raise ValueError(f"script_env variable {name} is not supplied by the active external secret source")
+        value = get_secret(name)
+        if value is None:
+            raise ValueError(f"script_env variable {name} is unavailable in the active profile scope")
+        overlay[name] = value
+    return overlay
 
 
 def _positive_int(raw) -> Optional[int]:
@@ -446,6 +502,7 @@ def _script_argv(
 def _run_job_script(
     script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, interpreter: Optional[str] = None,
+    script_env=None,
 ) -> tuple[bool, str]:
     """Execute a cron job's script and return ``(success, output)``; on failure *output* is the
     error message for the LLM to report. Env goes through ``build_subprocess_env`` (SECURITY.md
@@ -497,6 +554,7 @@ def _run_job_script(
         # in terminal.env_passthrough from that scope (#114209). The factory snapshots the process
         # env itself — no raw copy at the spawn site (test_subprocess_env_guard).
         env = build_subprocess_env(strip_launch_profile=True)
+        env.update(_declared_script_env(script_env))
         env.update(env_overlay)
         # Subprocess cwd only (default: scripts-dir parent). NEVER os.chdir() the process.
         # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
@@ -579,7 +637,7 @@ def _run_job_script_with_claim_heartbeat(
     dispatched job, never re-read, so a stale runner cannot extend a replacement owner's claim."""
     def run() -> tuple[bool, str]:
         return _run_job_script(script_path, workdir=workdir, cancel_event=cancel_event,
-                               interpreter=job.get("interpreter"))
+                               interpreter=job.get("interpreter"), script_env=job.get("script_env"))
 
     schedule = job.get("schedule")
     claim = job.get("run_claim")

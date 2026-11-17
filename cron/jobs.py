@@ -1692,6 +1692,18 @@ def _normalize_enabled_toolsets(value: Any) -> Optional[list[str]]:
     return [str(j).strip() for j in value if str(j).strip()]
 
 
+def _normalize_script_env(value: Any) -> Optional[list[str]]:
+    """Normalize the exact external-secret names leased to this job's script children."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("script_env must be a list of environment-variable names")
+    if any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+           for name in value):
+        raise ValueError("script_env contains an invalid environment-variable name")
+    return list(value)
+
+
 def _normalize_reasoning_effort(value: Any) -> Optional[str]:
     """Spelling-only validation via the shared parser (cron knob never stricter/looser than
     config.yaml); model capability is deliberately NOT checked (model unknowable at create time,
@@ -1732,6 +1744,7 @@ _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "grace_minutes": jobs_time.normalize_grace_minutes,
     "catch_up": _normalize_catch_up,
     "wrap_response": normalize_wrap_response,
+    "script_env": _normalize_script_env,
 }
 _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     # [] is an explicit zero-tool allowlist and must survive the update path as [] too (#82010).
@@ -1740,6 +1753,7 @@ _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "monitor_script": _normalize_job_optional_text,
     "monitor_url": _normalize_job_optional_text,
     "interpreter": _normalize_job_optional_text,
+    "script_env": _normalize_script_env,
     "reasoning_effort": _normalize_reasoning_effort,
     # ``0`` is a real grace value (never catch up), so this normalizer must never use an
     # ``in {None, "", False}`` test — ``0 == False`` would silently clear it.
@@ -1802,6 +1816,7 @@ def create_job(
     timezone: Optional[str] = None,
     grace_minutes: Optional[int] = None,
     wrap_response: Optional[bool] = None,
+    script_env: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Create a new cron job and return the stored record.
 
@@ -1906,6 +1921,7 @@ def create_job(
         ("failure_deliver", f["failure_deliver"]), ("interpreter", f["interpreter"]),
         ("timezone", f["timezone"]), ("grace_minutes", f["grace_minutes"]),
         ("catch_up", f["catch_up"]), ("wrap_response", f["wrap_response"]),
+        ("script_env", f["script_env"]),
     ):
         if value is not None:
             job[key] = value

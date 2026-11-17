@@ -216,6 +216,25 @@ def test_update_job_allows_clearing_monitor_then_no_agent(hermes_env):
 # ---------------------------------------------------------------------------
 
 
+def test_monitor_script_forwards_job_scoped_script_env(hermes_env, monkeypatch):
+    from cron import monitor, scheduler_script
+
+    captured = {}
+
+    def fake_run(script_path, **kwargs):
+        captured.update(kwargs)
+        return True, "ok"
+
+    monkeypatch.setattr(scheduler_script, "_run_job_script", fake_run)
+    result = monitor._run_monitor_source({
+        "monitor_script": "monitor.py",
+        "script_env": ["JOB_API_KEY"],
+    })
+
+    assert result == (True, "ok")
+    assert captured["script_env"] == ["JOB_API_KEY"]
+
+
 def test_hash_is_exact_bytes(hermes_env):
     from cron.monitor import hash_monitor_output
 

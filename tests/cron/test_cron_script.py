@@ -70,6 +70,25 @@ class TestJobScriptField:
         updated = update_job(job["id"], {"script": "/new/script.py"})
         assert updated["script"] == "/new/script.py"
 
+    def test_create_and_update_job_script_env(self, cron_env):
+        from cron.jobs import create_job, get_job, update_job
+
+        job = create_job(
+            prompt=None,
+            schedule="every 30m",
+            script="report.py",
+            no_agent=True,
+            script_env=["JOB_API_KEY"],
+        )
+        loaded = get_job(job["id"])
+        assert loaded is not None
+        assert loaded["script_env"] == ["JOB_API_KEY"]
+
+        update_job(job["id"], {"script_env": ["OTHER_API_KEY"]})
+        loaded = get_job(job["id"])
+        assert loaded is not None
+        assert loaded["script_env"] == ["OTHER_API_KEY"]
+
 
 def test_cronjob_tool_rejects_stale_past_one_shot(cron_env, monkeypatch):
     from tools.cronjob_tools import cronjob
@@ -190,6 +209,110 @@ class TestRunJobScript:
         success, output = _run_job_script("env_probe.py")
         assert success is True
         assert output == "ABSENT"
+
+    def test_script_env_restores_only_exact_declared_external_secret(
+        self, cron_env, monkeypatch
+    ):
+        """An explicit job lease reaches the child, never its source siblings."""
+        from agent.secret_scope import reset_secret_scope, set_secret_scope
+        from hermes_cli import env_loader
+
+        monkeypatch.setattr(
+            env_loader, "_SOURCE_SUPPLIED_NAMES", {"JOB_API_KEY", "UNRELATED_API_KEY"}
+        )
+        monkeypatch.setattr(
+            env_loader,
+            "_SECRET_SOURCE_VALUES_BY_HOME",
+            {str(cron_env.resolve()): {
+                "JOB_API_KEY": "leased-value",
+                "UNRELATED_API_KEY": "must-not-leak",
+            }},
+        )
+        from cron import scheduler_script
+        from tools.environments import local as local_env
+        monkeypatch.setattr(
+            scheduler_script,
+            "_script_argv",
+            lambda path, interpreter=None: ([sys.executable, str(path)], {}, None),
+        )
+        monkeypatch.setattr(
+            local_env,
+            "build_subprocess_env",
+            lambda **kwargs: {"PATH": os.environ.get("PATH", "")},
+        )
+        token = set_secret_scope(
+            {"JOB_API_KEY": "leased-value", "UNRELATED_API_KEY": "must-not-leak"},
+            profile_home=str(cron_env),
+        )
+        try:
+            script = cron_env / "scripts" / "leased.py"
+            script.write_text(
+                "import os\n"
+                "print(os.environ.get('JOB_API_KEY', 'ABSENT'))\n"
+                "print('PRESENT' if os.environ.get('UNRELATED_API_KEY') else 'ABSENT')\n"
+            )
+            from cron.scheduler_script import _run_job_script
+            success, output = _run_job_script("leased.py", script_env=["JOB_API_KEY"])
+        finally:
+            reset_secret_scope(token)
+
+        assert success is True, output
+        assert output.splitlines() == ["leased-value", "ABSENT"]
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "BWS_ACCESS_TOKEN", "HERMES_HOME", "hermes_home", "LD_PRELOAD",
+            "PYTHONPATH", "pythonpath", "NOT_SOURCE_SUPPLIED",
+        ],
+    )
+    def test_script_env_rejects_bootstrap_runtime_and_unproven_names(
+        self, cron_env, monkeypatch, name
+    ):
+        from agent.secret_scope import reset_secret_scope, set_secret_scope
+        from cron.scheduler_script import _declared_script_env
+        from hermes_cli import env_loader
+
+        monkeypatch.setattr(
+            env_loader,
+            "_SOURCE_SUPPLIED_NAMES",
+            set() if name == "NOT_SOURCE_SUPPLIED" else {name},
+        )
+        monkeypatch.setattr(
+            env_loader,
+            "_SECRET_SOURCE_VALUES_BY_HOME",
+            {str(cron_env.resolve()): (
+                {} if name == "NOT_SOURCE_SUPPLIED" else {name: "must-not-pass"}
+            )},
+        )
+        token = set_secret_scope({name: "must-not-pass"}, profile_home=str(cron_env))
+        try:
+            with pytest.raises(ValueError):
+                _declared_script_env([name])
+        finally:
+            reset_secret_scope(token)
+
+    def test_job_script_env_is_forwarded_to_the_script_runner(self, monkeypatch):
+        from cron import scheduler_script
+
+        captured = {}
+
+        def fake_run(script_path, **kwargs):
+            captured.update(kwargs)
+            return True, "ok"
+
+        monkeypatch.setattr(scheduler_script, "_run_job_script", fake_run)
+        result = scheduler_script._run_job_script_with_claim_heartbeat(
+            {
+                "id": "job-id",
+                "schedule": {"kind": "cron"},
+                "script_env": ["JOB_API_KEY"],
+            },
+            "job.py",
+        )
+
+        assert result == (True, "ok")
+        assert captured["script_env"] == ["JOB_API_KEY"]
 
     @pytest.mark.platforms("windows")
     def test_windows_uv_venv_python_script_bypasses_launcher(self, cron_env, tmp_path, monkeypatch):
