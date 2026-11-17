@@ -99,6 +99,42 @@ def test_delegate_subprocess_drops_task_secret_lease(monkeypatch):
     assert "SOURCE_ID" not in delegated
 
 
+def test_local_terminal_snapshot_does_not_restore_task_lease_for_delegate(monkeypatch, tmp_path):
+    from tools.environments import local
+    from tools.environments.local import LocalEnvironment
+
+    monkeypatch.setattr(local, "_user_tools_first", lambda value: value)
+    monkeypatch.setattr(local, "_prepend_hermes_bin_dir", lambda value: value)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_allowed")
+    monkeypatch.setenv(
+        TASK_SECRET_ENV_MARKER,
+        "TARGET_TOKEN=SOURCE_TOKEN,TARGET_ID=SOURCE_ID",
+    )
+    monkeypatch.setenv("TARGET_TOKEN", "synthetic-token")
+    monkeypatch.setenv("TARGET_ID", "synthetic-id")
+    monkeypatch.setenv("SOURCE_TOKEN", "synthetic-source-token")
+    monkeypatch.setenv("SOURCE_ID", "synthetic-source-id")
+
+    terminal = LocalEnvironment(cwd=str(tmp_path), persistent=True)
+    try:
+        with delegated_child_context("child"):
+            result = terminal.execute(
+                "for v in TARGET_TOKEN TARGET_ID SOURCE_TOKEN SOURCE_ID; do "
+                "if [ -n \"$(printenv \"$v\" 2>/dev/null)\" ]; then "
+                "printf '%s=present\\n' \"$v\"; else printf '%s=absent\\n' \"$v\"; fi; done",
+                timeout=10,
+            )
+        assert result["returncode"] == 0
+        assert result["output"].splitlines() == [
+            "TARGET_TOKEN=absent",
+            "TARGET_ID=absent",
+            "SOURCE_TOKEN=absent",
+            "SOURCE_ID=absent",
+        ]
+    finally:
+        terminal.cleanup()
+
+
 def test_tool_child_restore_recovers_source_after_worker_startup_scrubs_target(monkeypatch, tmp_path):
     home = tmp_path / ".hermes" / "profiles" / "jonah"
     home.mkdir(parents=True)

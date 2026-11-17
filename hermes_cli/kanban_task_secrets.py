@@ -59,6 +59,22 @@ def inject_task_secret_env(env: dict[str, str], task_id: str, config: Mapping) -
     return targets
 
 
+def task_secret_env_names(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """Validated target/source names pinned by the current exact-task lease."""
+    source = os.environ if env is None else env
+    raw = str(source.get(TASK_SECRET_ENV_MARKER) or os.environ.get(TASK_SECRET_ENV_MARKER) or "")
+    names: set[str] = set()
+    for item in raw.split(","):
+        target, sep, secret_source = item.strip().partition("=")
+        if not sep:
+            continue
+        if _ENV_NAME.fullmatch(target):
+            names.add(target)
+        if _ENV_NAME.fullmatch(secret_source):
+            names.add(secret_source)
+    return tuple(sorted(names))
+
+
 def strip_task_secret_env_for_delegate(env: Mapping[str, str]) -> dict[str, str]:
     """Remove an exact-task secret lease from a delegated child environment.
 
@@ -68,15 +84,8 @@ def strip_task_secret_env_for_delegate(env: Mapping[str, str]) -> dict[str, str]
     pinned mapping and the lease marker before crossing the process boundary.
     """
     cleaned = dict(env)
-    raw = str(cleaned.get(TASK_SECRET_ENV_MARKER) or os.environ.get(TASK_SECRET_ENV_MARKER) or "")
-    for item in raw.split(","):
-        target, sep, source = item.strip().partition("=")
-        if not sep:
-            continue
-        if _ENV_NAME.fullmatch(target):
-            cleaned.pop(target, None)
-        if _ENV_NAME.fullmatch(source):
-            cleaned.pop(source, None)
+    for name in task_secret_env_names(cleaned):
+        cleaned.pop(name, None)
     cleaned.pop(TASK_SECRET_ENV_MARKER, None)
     return cleaned
 

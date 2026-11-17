@@ -1153,9 +1153,13 @@ class LocalEnvironment(BaseEnvironment):
         in the snapshot and be sourced by profile B. Prefix-only and monotonic on
         purpose: conservative even when the context-gated carve-out is inactive."""
         merged = dict(os.environ | self.env)
-        return tuple(sorted(
+        names = {
             name for name in merged
-            if isinstance(name, str) and _matches_terminal_first_party_prefix(name)))
+            if isinstance(name, str) and _matches_terminal_first_party_prefix(name)
+        }
+        from hermes_cli.kanban_task_secrets import task_secret_env_names
+        names.update(task_secret_env_names(merged))
+        return tuple(sorted(names))
 
     def _snapshot_excluded_passthrough_names(self) -> tuple[str, ...]:
         """Plus the plugins' session env names: each command gets its own session's values. Plus the

@@ -416,11 +416,12 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
             return ()
         try:
             from agent.secret_scope import is_multiplex_active
+            names = tuple(self._additional_profile_scoped_passthrough_names())
             if is_multiplex_active():
                 from tools.env_passthrough import get_all_passthrough
-                names = (*get_all_passthrough(), *self._additional_profile_scoped_passthrough_names())
-                self._snapshot_passthrough_names.update(
-                    name for name in names if isinstance(name, str) and _SHELL_ENV_NAME_RE.fullmatch(name))
+                names = (*get_all_passthrough(), *names)
+            self._snapshot_passthrough_names.update(
+                name for name in names if isinstance(name, str) and _SHELL_ENV_NAME_RE.fullmatch(name))
         except Exception:
             logger.debug("Could not refresh profile-scoped snapshot exclusions", exc_info=True)
         return tuple(sorted(self._snapshot_passthrough_names))
