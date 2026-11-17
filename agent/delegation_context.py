@@ -178,10 +178,17 @@ def delegated_child_subprocess_env(
 ) -> dict[str, str] | None:
     """Carry worker/delegate descendant denial across a real process spawn.
 
-    Location and credentials are untouched; callers retain their existing secret policy.
+    Location and ordinary credentials are untouched; callers retain their existing
+    secret policy. An exact-task secret lease is removed only for delegate descendants.
     Dispatcher workers and supervised tool transports grant their own explicit scope.
     """
-    if not (is_delegated_child_process_context() or os.environ.get("HERMES_KANBAN_TASK")
+    delegated = is_delegated_child_process_context()
+    if not (delegated or os.environ.get("HERMES_KANBAN_TASK")
             or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))):
         return None if env is None else dict(env)
-    return scrub_kanban_env(os.environ if env is None else env)
+    cleaned = scrub_kanban_env(os.environ if env is None else env)
+    if delegated:
+        from hermes_cli.kanban_task_secrets import strip_task_secret_env_for_delegate
+
+        cleaned = strip_task_secret_env_for_delegate(cleaned)
+    return cleaned

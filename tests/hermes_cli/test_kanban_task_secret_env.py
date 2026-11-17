@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from hermes_cli.kanban_task_secrets import (
     TASK_SECRET_ENV_MARKER,
     inject_task_secret_env,
     restore_task_secret_env_for_child,
+    strip_task_secret_env_for_delegate,
 )
 
 
@@ -64,6 +66,37 @@ def test_tool_child_restore_requires_dispatcher_ownership(monkeypatch, tmp_path)
 
     monkeypatch.delenv("HERMES_KANBAN_TASK")
     assert restore_task_secret_env_for_child({}) == {}
+
+
+def test_delegate_subprocess_drops_task_secret_lease(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_allowed")
+    monkeypatch.setenv(
+        TASK_SECRET_ENV_MARKER,
+        "TARGET_TOKEN=SOURCE_TOKEN,TARGET_ID=SOURCE_ID",
+    )
+    monkeypatch.setenv("TARGET_TOKEN", "synthetic-token")
+    monkeypatch.setenv("TARGET_ID", "synthetic-id")
+    monkeypatch.setenv("SOURCE_TOKEN", "must-not-cross")
+    monkeypatch.setenv("SOURCE_ID", "must-not-cross")
+
+    direct = strip_task_secret_env_for_delegate(dict(os.environ))
+    assert TASK_SECRET_ENV_MARKER not in direct
+    assert "TARGET_TOKEN" not in direct
+    assert "TARGET_ID" not in direct
+    assert "SOURCE_TOKEN" not in direct
+    assert "SOURCE_ID" not in direct
+
+    from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER, delegated_child_subprocess_env
+
+    with delegated_child_context():
+        delegated = delegated_child_subprocess_env(dict(os.environ))
+    assert delegated is not None
+    assert delegated.get(DELEGATED_CHILD_ENV_MARKER)
+    assert TASK_SECRET_ENV_MARKER not in delegated
+    assert "TARGET_TOKEN" not in delegated
+    assert "TARGET_ID" not in delegated
+    assert "SOURCE_TOKEN" not in delegated
+    assert "SOURCE_ID" not in delegated
 
 
 def test_tool_child_restore_recovers_source_after_worker_startup_scrubs_target(monkeypatch, tmp_path):

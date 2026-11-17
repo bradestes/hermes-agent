@@ -59,6 +59,28 @@ def inject_task_secret_env(env: dict[str, str], task_id: str, config: Mapping) -
     return targets
 
 
+def strip_task_secret_env_for_delegate(env: Mapping[str, str]) -> dict[str, str]:
+    """Remove an exact-task secret lease from a delegated child environment.
+
+    ``delegate_task`` children execute in-process, so the dispatcher's worker
+    environment remains visible while their ContextVar is active.  Every real
+    subprocess spawned by that child must therefore drop both sides of the
+    pinned mapping and the lease marker before crossing the process boundary.
+    """
+    cleaned = dict(env)
+    raw = str(cleaned.get(TASK_SECRET_ENV_MARKER) or os.environ.get(TASK_SECRET_ENV_MARKER) or "")
+    for item in raw.split(","):
+        target, sep, source = item.strip().partition("=")
+        if not sep:
+            continue
+        if _ENV_NAME.fullmatch(target):
+            cleaned.pop(target, None)
+        if _ENV_NAME.fullmatch(source):
+            cleaned.pop(source, None)
+    cleaned.pop(TASK_SECRET_ENV_MARKER, None)
+    return cleaned
+
+
 def restore_task_secret_env_for_child(env: dict[str, str]) -> dict[str, str]:
     """Re-add allowlisted values only for this dispatcher-owned worker's tool child.
 
