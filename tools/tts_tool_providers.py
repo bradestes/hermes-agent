@@ -503,6 +503,14 @@ def _gemini_audio_tags_enabled(gemini_config: dict[str, Any], model: str) -> boo
     return False
 
 
+def _gemini_voice_config(model: str, voice: str) -> dict[str, Any]:
+    """Build the single-speaker voice shape expected by the selected TTS generation."""
+    normalized = (model or "").strip().lower().rsplit("/", 1)[-1]
+    if normalized.startswith("gemini-3.8-") and normalized.endswith("-tts"):
+        return {"voice": voice}
+    return {"prebuiltVoiceConfig": {"voiceName": voice}}
+
+
 def _rewrite_gemini_tts_audio_tags(text: str, persona_prompt: str = "") -> str:
     """Use the configured auxiliary model to insert Gemini audio tags (falls back to *text*)."""
     transcript = text.strip()
@@ -589,7 +597,7 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: dict[str, Any]
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
-            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
+            "speechConfig": {"voiceConfig": _gemini_voice_config(model, voice)},
         },
     }
     # HTTP errors include request URLs, so credentials must stay in headers.
@@ -614,4 +622,7 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: dict[str, Any]
         raise RuntimeError(f"Gemini TTS response was malformed: {e}") from e
     if not audio_b64:
         raise RuntimeError("Gemini TTS returned empty audio data")
-    return _write_wav_bytes_as(_wrap_pcm_as_wav(base64.b64decode(audio_b64)), output_path)
+    audio_bytes = base64.b64decode(audio_b64)
+    if audio_bytes[:4] != b"RIFF" or audio_bytes[8:12] != b"WAVE":
+        audio_bytes = _wrap_pcm_as_wav(audio_bytes)
+    return _write_wav_bytes_as(audio_bytes, output_path)

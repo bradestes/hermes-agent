@@ -333,7 +333,8 @@ class GeminiStreamer(StreamingTTSProvider):
         import json as _json
         import requests
         from tools.tts_tool_providers import (
-            DEFAULT_GEMINI_TTS_BASE_URL, DEFAULT_GEMINI_TTS_MODEL, DEFAULT_GEMINI_TTS_VOICE)
+            DEFAULT_GEMINI_TTS_BASE_URL, DEFAULT_GEMINI_TTS_MODEL, DEFAULT_GEMINI_TTS_VOICE,
+            _gemini_voice_config)
         from hermes_cli.config import get_env_value
         api_key = _gemini_key()
         model = str(self.section.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
@@ -346,7 +347,7 @@ class GeminiStreamer(StreamingTTSProvider):
             "contents": [{"parts": [{"text": text}]}],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
-                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}}}
+                "speechConfig": {"voiceConfig": _gemini_voice_config(model, voice)}}}
         url = f"{base_url}/models/{model}:streamGenerateContent"
 
         def _sse_chunks() -> Iterator[bytes]:

@@ -1,7 +1,10 @@
 """Tests for the Google Gemini TTS provider in tools/tts_tool.py."""
 
 import base64
+import json
 import struct
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -171,6 +174,78 @@ class TestGenerateGeminiTts:
             ["prebuiltVoiceConfig"]["voiceName"]
         )
         assert voice == "Puck"
+
+    def test_gemini_38_custom_voice_uses_direct_voice_and_preserves_wav(
+        self, tmp_path, monkeypatch, fake_pcm_bytes
+    ):
+        from tools.tts_tool import _generate_gemini_tts
+        from tools.tts_tool_delivery import _wrap_pcm_as_wav
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        wav = _wrap_pcm_as_wav(fake_pcm_bytes)
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"inlineData": {
+                "mimeType": "audio/wav",
+                "data": base64.b64encode(wav).decode(),
+            }}]}}]
+        }
+        config = {"gemini": {
+            "model": "gemini-3.8-flash-tts",
+            "voice": "voice_2441fabfqxmp",
+        }}
+        output_path = str(tmp_path / "test.wav")
+
+        with patch("requests.post", return_value=response) as mock_post:
+            _generate_gemini_tts("Hi", output_path, config)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["generationConfig"]["speechConfig"]["voiceConfig"] == {
+            "voice": "voice_2441fabfqxmp"
+        }
+        assert (tmp_path / "test.wav").read_bytes() == wav
+
+    def test_gemini_38_custom_voice_stream_uses_direct_voice(self, monkeypatch):
+        from tools import tts_streaming
+
+        pcm = b"\x01\x00" * 40
+        event = "data: " + json.dumps({
+            "candidates": [{"content": {"parts": [{
+                "inlineData": {"data": base64.b64encode(pcm).decode()}
+            }]}}]
+        })
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            def iter_lines(self, decode_unicode=True):
+                yield event
+
+        captured = {}
+
+        def post(url, **kwargs):
+            captured.update(kwargs)
+            return Response()
+
+        requests = types.SimpleNamespace(post=post)
+        monkeypatch.setitem(sys.modules, "requests", requests)
+        monkeypatch.setattr(tts_streaming, "_gemini_key", lambda: "test-key")
+        streamer = tts_streaming.GeminiStreamer({}, {
+            "model": "gemini-3.8-flash-tts",
+            "voice": "voice_2441fabfqxmp",
+        })
+
+        assert list(streamer.stream("Hi")) == [pcm]
+        assert captured["json"]["generationConfig"]["speechConfig"]["voiceConfig"] == {
+            "voice": "voice_2441fabfqxmp"
+        }
 
 
     def test_audio_tag_rewrite_failure_falls_back_to_original_text(
