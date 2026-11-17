@@ -10,6 +10,7 @@ from tui_gateway import compute_host, server
 from tui_gateway.compute_host import ComputeHost, _default_workers
 from tui_gateway.host_supervisor import (
     HostSupervisor,
+    _compute_host_child_env,
     append_log_record,
 )
 
@@ -43,6 +44,25 @@ def test_compute_host_workers_inherit_tui_pool_env(monkeypatch):
     # Malformed env falls back to the same default as unset.
     monkeypatch.setenv("HERMES_TUI_RPC_POOL_WORKERS", "not-an-int")
     assert _default_workers() == default
+
+
+def test_compute_host_child_env_cannot_restore_secret_source_values(monkeypatch):
+    from hermes_cli import env_loader
+
+    supplied = {"ACME_DEPLOY_CREDENTIAL", "BWS_ACCESS_TOKEN", "OPENAI_API_KEY"}
+    monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", supplied)
+    monkeypatch.setenv("ACME_DEPLOY_CREDENTIAL", "ambient-vault-value")
+    monkeypatch.setenv("BWS_ACCESS_TOKEN", "ambient-machine-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-value")
+
+    env = _compute_host_child_env({
+        "ACME_DEPLOY_CREDENTIAL": "explicit-vault-value",
+        "BWS_ACCESS_TOKEN": "explicit-machine-token",
+    })
+
+    assert "ACME_DEPLOY_CREDENTIAL" not in env
+    assert "BWS_ACCESS_TOKEN" not in env
+    assert env["OPENAI_API_KEY"] == "provider-value"
 
 
 def test_compute_host_routes_relayed_response_and_lock_to_its_open_request(monkeypatch):

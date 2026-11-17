@@ -30,6 +30,7 @@ from tools.environments.local_env_policy import (
     _home_adapter_secret_env, _home_declared_key_env, _matches_terminal_first_party_prefix,
     _plugin_terminal_env_strip_keys,
     _registered_adapter_secret_env, _registry_adapter_secret_env, _secret_source_bootstrap_env,
+    _source_supplied_secret_env,
     strip_profile_gate_env, strip_supervised_process_identity)
 from tools.environments.local_pythonpath import (
     _build_hermes_repo_root_aliases, _strip_hermes_owned_pythonpath_and_runtime_markers)
@@ -292,18 +293,23 @@ def _filter_secret_env(
         is_env_passthrough, resolve_passthrough_value = (lambda _: False), (lambda _n, fb: fb)
     plugin_strip_folded = frozenset(k.upper() for k in plugin_strip)
     registered = _registered_adapter_secret_env() | _home_declared_key_env()
+    source_supplied = _source_supplied_secret_env()
     for key, value in items.items():
         if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             if not unwrap_force:
                 continue
             key = key[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
             if not _is_hermes_internal_secret(key):
+                if key.upper() in source_supplied and not is_env_passthrough(key):
+                    continue
                 out[key] = value
             continue
         if _is_hermes_internal_secret(key) or key.upper() in plugin_strip_folded:
             continue
         first_party = _is_terminal_first_party_env(key)
         passthrough = is_env_passthrough(key)
+        if key.upper() in source_supplied and not passthrough:
+            continue
         if _is_provider_env_blocklisted(key, registered) and not (passthrough or first_party):
             continue
         if passthrough and not first_party:
@@ -338,7 +344,10 @@ def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
     # Unguarded on purpose: a scope/config failure here must be loud, not silently drop the
     # declared secret again (#114209); _scrub_child_env calls it the same way.
     from tools.env_passthrough import scoped_passthrough_additions
-    out.update((k, v) for k, v in scoped_passthrough_additions(out).items() if k not in plugin_strip)
+    out.update(
+        (k, v) for k, v in scoped_passthrough_additions(out).items()
+        if k not in plugin_strip and k.upper() != "BWS_ACCESS_TOKEN"
+    )
     path_key = _path_env_key(out)
     # Keep bare ``hermes`` invocations available to child jobs even when the gateway was launched by a
     # service manager or cron without the console script's directory on PATH. The terminal environment
@@ -388,8 +397,11 @@ def _scrub_credentials(env: dict, *, inherit_credentials: bool) -> dict:
     strip_folded = _ALWAYS_STRIP_FOLDED | {k.upper() for k in _plugin_terminal_env_strip_keys()} | home_secrets
     registered = _registry_adapter_secret_env() | _home_declared_key_env()  # home_secrets already strip above
     drop_bridge_markers(env)
+    source_supplied = _source_supplied_secret_env()
     for key in list(env):
         if (key.upper() in strip_folded
+                or (key.upper() in source_supplied
+                    and (not inherit_credentials or not _is_provider_env_blocklisted(key, registered)))
                 or (not inherit_credentials and _is_provider_env_blocklisted(key, registered))
                 or key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX)
                 or _is_hermes_internal_secret(key)):
@@ -400,13 +412,14 @@ def _scrub_credentials(env: dict, *, inherit_credentials: bool) -> dict:
 def build_subprocess_env(
     base: Mapping[str, str] | None = None, *, inherit_profile_home: bool = True,
     scrub_secrets: bool = True, extra: Mapping[str, str] | None = None,
-    strip_launch_profile: bool = False) -> dict[str, str]:
+    strip_launch_profile: bool = False, inherit_bws_access_token: bool = False) -> dict[str, str]:
     """Single factory for child-process envs. ``base=None`` snapshots ``os.environ``.
     ``scrub_secrets=True`` -> :func:`_sanitize_subprocess_env` (profile home inherent,
     ``inherit_profile_home`` ignored). ``scrub_secrets=False`` keeps the base's secrets
-    (git credential flows, ``bws``/``op``); ``inherit_profile_home``
-    bridges HERMES_HOME + HOME and ``extra`` is applied last so caller overrides win. Both modes
-    drop the supervised process's own identity (:func:`strip_supervised_process_identity`).
+    except that secret-source bootstrap tokens are removed unless the internal management caller
+    sets ``inherit_bws_access_token=True``. ``inherit_profile_home`` bridges HERMES_HOME + HOME and
+    ``extra`` is applied before that bootstrap-token fence. Both modes drop the supervised process's
+    own identity (:func:`strip_supervised_process_identity`).
     ``strip_launch_profile`` drops the LAUNCH profile's ``.env`` residue from the base first
     (:func:`strip_launch_profile_env`; a no-op unless a routed home is active) so a child that
     acts for a routed profile sees only that profile's declared names, never the launch profile's.
@@ -431,6 +444,11 @@ def build_subprocess_env(
     if extra:
         env.update(extra)
     strip_supervised_process_identity(env)
+    if not inherit_bws_access_token:
+        bootstrap = {name.upper() for name in _secret_source_bootstrap_env()}
+        for key in list(env):
+            if key.upper() in bootstrap:
+                env.pop(key, None)
     from agent.delegation_context import delegated_child_subprocess_env
     return delegated_child_subprocess_env(env)
 
@@ -457,7 +475,10 @@ def served_profile_child_env(
     from agent.secret_scope import (
         UnscopedSecretError, build_profile_secret_scope, current_secret_scope, is_multiplex_active)
     from hermes_constants import apply_scratch_tmp_env, get_hermes_home_override
-    env = dict(base) if base is not None else hermes_subprocess_env(inherit_credentials=inherit_credentials)
+    env = hermes_subprocess_env(
+        inherit_credentials=inherit_credentials,
+        base_env=dict(base) if base is not None else None,
+    )
     target = str(target_home or get_hermes_home_override() or "")
     routed = bool(target) and _is_routed_home(target)
     if target:
@@ -476,7 +497,9 @@ def served_profile_child_env(
                     "", "served_profile_child_env(inherit_credentials=True) called with no target home and "
                     "no profile secret scope bound while multiplexing is on; the child would inherit the "
                     "launch profile's credentials. Bind the profile scope (or pass target_home) at the spawn site.")
-        env.update((k, v) for k, v in (secrets or {}).items() if v is not None)
+        profile_credentials = {k: v for k, v in (secrets or {}).items() if v is not None}
+        _scrub_credentials(profile_credentials, inherit_credentials=True)
+        env.update(profile_credentials)
         if not (_is_routed_home(target) if target else secrets is not None):
             _restore_bootstrap_tokens(env, os.environ if base is None else base)
     _carry_bridge_markers(env, base if base is not None else os.environ, own_profile=not routed)

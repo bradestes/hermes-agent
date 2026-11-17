@@ -58,7 +58,11 @@ def source_child_env() -> dict[str, str]:
     if source_env is os.environ:
         from tools.environments.local import build_subprocess_env
 
-        return build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
+        return build_subprocess_env(
+            scrub_secrets=False,
+            inherit_profile_home=False,
+            inherit_bws_access_token=True,
+        )
     return dict(source_env)
 
 

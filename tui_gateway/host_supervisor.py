@@ -81,6 +81,12 @@ def _repo_root() -> Path:
     return Path(project_root_str())
 
 
+def _compute_host_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the compute-host environment without re-overlaying unsanitized ambient values."""
+    base = {**os.environ, **(extra or {})}
+    return hermes_subprocess_env(inherit_credentials=True, base_env=base)
+
+
 def _check_output(argv: list[str], **kwargs: Any) -> str:
     """Stripped stdout of a short subprocess, or ``""`` on any failure."""
     with contextlib.suppress(Exception):
@@ -368,7 +374,7 @@ class HostSupervisor:
             raise RuntimeError("compute host respawn disabled after crash loop")
         self._hello_event.clear()
         self._hello = {}
-        env = {**hermes_subprocess_env(inherit_credentials=True), **os.environ, **(self.env or {})}
+        env = _compute_host_child_env(self.env)
         env["HERMES_COMPUTE_HOST_HEARTBEAT_SECS"] = str(self.heartbeat_secs)
         root = str(_repo_root())
         env.setdefault("PYTHONPATH", root)

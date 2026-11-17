@@ -133,6 +133,113 @@ def test_adapter_and_provider_profile_secrets_never_reach_children(child_env, mo
     assert all(is_env_passthrough(name) for name in OPERATOR_SECRETS)
 
 
+@pytest.mark.parametrize("builder", ["foreground", "background", "factory"])
+def test_bulk_secret_source_values_require_explicit_terminal_passthrough(child_env, monkeypatch, builder):
+    """A bulk vault value is a Hermes-managed secret even when its arbitrary name is not in a
+    provider registry. It must not reach any child unless the operator explicitly opts that exact
+    name into terminal passthrough."""
+    from hermes_cli import env_loader
+    from tools.env_passthrough import register_env_passthrough
+
+    name = "ACME_DEPLOY_CREDENTIAL"
+    monkeypatch.setenv(name, "vault-value")
+    monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", {name})
+    factories = {
+        "foreground": lambda: local._make_run_env({}),
+        "background": lambda: local._sanitize_subprocess_env(dict(os.environ)),
+        "factory": local.build_subprocess_env,
+        "nonterminal": local.hermes_subprocess_env,
+    }
+    assert name not in factories[builder]()
+
+    register_env_passthrough([name])
+    assert factories[builder]()[name] == "vault-value"
+
+
+def test_bulk_secret_source_values_never_reach_nonterminal_children(child_env, monkeypatch):
+    from hermes_cli import env_loader
+    from tools.env_passthrough import register_env_passthrough
+
+    name = "ACME_DEPLOY_CREDENTIAL"
+    monkeypatch.setenv(name, "vault-value")
+    monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", {name})
+    register_env_passthrough([name])
+    assert name not in local.hermes_subprocess_env()
+
+
+def test_force_prefix_cannot_bypass_bulk_secret_source_fence(child_env, monkeypatch):
+    from hermes_cli import env_loader
+
+    name = "ACME_DEPLOY_CREDENTIAL"
+    monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", {name})
+    forced = local._HERMES_PROVIDER_ENV_FORCE_PREFIX + name
+    out = {}
+    local._filter_secret_env({forced: "vault-value"}, out, unwrap_force=True)
+    assert name not in out
+
+
+@pytest.mark.parametrize("builder", ["foreground", "background", "factory", "nonterminal"])
+def test_secret_source_bootstrap_token_never_reaches_children(child_env, monkeypatch, builder):
+    """A vault's machine credential is bootstrap authority, never a child-process credential."""
+    from tools.env_passthrough import register_env_passthrough
+
+    name = "BWS_ACCESS_TOKEN"
+    monkeypatch.setenv(name, "machine-token")
+    register_env_passthrough([name])
+    factories = {
+        "foreground": lambda: local._make_run_env({}),
+        "background": lambda: local._sanitize_subprocess_env(dict(os.environ)),
+        "factory": local.build_subprocess_env,
+        "nonterminal": local.hermes_subprocess_env,
+    }
+    assert name not in factories[builder]()
+
+
+@pytest.mark.parametrize("builder", ["foreground", "background", "factory"])
+def test_scoped_passthrough_overlay_cannot_reintroduce_bootstrap_token(child_env, monkeypatch, builder):
+    from tools import env_passthrough
+
+    monkeypatch.setattr(
+        env_passthrough,
+        "scoped_passthrough_additions",
+        lambda _present: {"BWS_ACCESS_TOKEN": "machine-token"},
+    )
+    factories = {
+        "foreground": lambda: local._make_run_env({}),
+        "background": lambda: local._sanitize_subprocess_env(dict(os.environ)),
+        "factory": local.build_subprocess_env,
+    }
+    assert "BWS_ACCESS_TOKEN" not in factories[builder]()
+
+
+@pytest.mark.parametrize("origin", ["ambient", "base", "extra"])
+def test_unscrubbed_factory_still_strips_bootstrap_token(child_env, monkeypatch, origin):
+    monkeypatch.setenv("BWS_ACCESS_TOKEN", "ambient-token")
+    if origin == "base":
+        env = local.build_subprocess_env(
+            base={"BWS_ACCESS_TOKEN": "base-token", "PATH": os.environ["PATH"]},
+            scrub_secrets=False,
+        )
+    elif origin == "extra":
+        env = local.build_subprocess_env(
+            scrub_secrets=False,
+            extra={"BWS_ACCESS_TOKEN": "extra-token"},
+        )
+    else:
+        env = local.build_subprocess_env(scrub_secrets=False)
+    assert "BWS_ACCESS_TOKEN" not in env
+
+
+def test_internal_secret_source_child_may_explicitly_inherit_bootstrap_token(child_env, monkeypatch):
+    monkeypatch.setenv("BWS_ACCESS_TOKEN", "machine-token")
+    env = local.build_subprocess_env(
+        scrub_secrets=False,
+        inherit_profile_home=False,
+        inherit_bws_access_token=True,
+    )
+    assert "BWS_ACCESS_TOKEN" in env
+
+
 def _user_platform_plugin(home, name, secret):
     plugin = home / "plugins" / "platforms" / name
     plugin.mkdir(parents=True)

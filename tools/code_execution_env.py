@@ -74,11 +74,18 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None, toolchain
         is_passthrough = is_env_passthrough
     if is_windows is None:
         is_windows = _IS_WINDOWS
+    from hermes_cli.secret_source_provenance import source_supplied_secret_env
+
+    source_supplied = source_supplied_secret_env()
     scrubbed = {}
     # Non-secret HERMES_* vars no allowlist admits are dropped on purpose; a script importing a
     # repo module that reads one would see it silently unset — log the drop, point at the opt-in.
     _dropped_hermes = []
     for k, v in source_env.items():
+        if k.upper() == "BWS_ACCESS_TOKEN":
+            continue
+        if k.upper() in source_supplied and not is_passthrough(k):
+            continue
         if is_passthrough(k):
             resolved = resolve_passthrough_value(k, v)
             if resolved is not None:
@@ -94,7 +101,10 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None, toolchain
             _dropped_hermes.append(k)
     # Declared names only the bound profile scope holds (a routed profile's own .env / sources
     # never enter the process env) — the loop above sees only names ``source_env`` carries.
-    scrubbed.update((k, v) for k, v in scoped_passthrough_additions(scrubbed).items() if is_passthrough(k))
+    scrubbed.update(
+        (k, v) for k, v in scoped_passthrough_additions(scrubbed).items()
+        if is_passthrough(k) and k.upper() != "BWS_ACCESS_TOKEN"
+    )
     if _dropped_hermes:
         logger.debug(
             "execute_code: dropped %d non-allowlisted HERMES_* var(s) from the "
@@ -199,6 +209,25 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     return child_env
 
 
+def _probe_child_env() -> dict[str, str]:
+    """Minimal non-secret environment for project-interpreter discovery probes."""
+    from agent.delegation_context import delegated_child_subprocess_env
+    from hermes_cli.secret_source_provenance import source_supplied_secret_env
+
+    source_supplied = source_supplied_secret_env()
+    env = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if (upper == "BWS_ACCESS_TOKEN" or upper in source_supplied
+                or any(marker in upper for marker in _SECRET_SUBSTRINGS)):
+            continue
+        if (any(key.startswith(prefix) for prefix in _SAFE_ENV_PREFIXES)
+                or key in _HERMES_CHILD_ALLOWED
+                or (_IS_WINDOWS and upper in _WINDOWS_ESSENTIAL_ENV_VARS)):
+            env[key] = value
+    return delegated_child_subprocess_env(env) or env
+
+
 # Interpreter-probe caches: success-only dicts (FIFO-evicted at the cap) rather than lru_cache —
 # a transient probe failure (fork pressure, 5s timeout) must not stick for the process lifetime.
 _PROBE_CACHE_MAX = 32
@@ -219,11 +248,10 @@ def _cache_probe_result(cache: dict, key: str, value):
 def _probe_python(python_path: str, code: str, *, text: bool = False):
     """Run ``python_path -c code``; None if missing, unspawnable, or past the 5s timeout."""
     try:
-        from agent.delegation_context import delegated_child_subprocess_env
         return subprocess.run(
             [python_path, "-c", code], timeout=5, capture_output=True, text=text,
             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
-            stdin=subprocess.DEVNULL, env=delegated_child_subprocess_env(),
+            stdin=subprocess.DEVNULL, env=_probe_child_env(),
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):

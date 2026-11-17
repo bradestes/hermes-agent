@@ -255,6 +255,19 @@ def _is_provider_env_blocklisted(name: str, _registered: frozenset | None = None
     return upper in _registered
 
 
+def _source_supplied_secret_env() -> frozenset[str]:
+    """Names supplied by configured external secret sources during this process.
+
+    Bulk sources can use arbitrary environment-variable names that no provider or
+    adapter registry knows about.  They are still Hermes-managed credentials and
+    must require an explicit terminal passthrough grant rather than inheriting into
+    every child merely because their name is unfamiliar.
+    """
+    from hermes_cli.secret_source_provenance import source_supplied_secret_env
+
+    return source_supplied_secret_env()
+
+
 # First-party platform credentials (``BUZZ_*``, driving the platform-mandated ``buzz``
 # CLI) carved out of the TERMINAL scrub only (``_make_run_env``,
 # ``_sanitize_subprocess_env``); execute_code, hermes_subprocess_env, docker and
@@ -401,7 +414,7 @@ def _is_hermes_internal_secret(key: str) -> bool:
     no use for them, and ``served_profile_child_env`` puts back the ones whose value the child
     kept."""
     upper = key.upper()
-    if upper.startswith(BRIDGED_ENV_MARKER_PREFIX):
+    if upper.startswith(BRIDGED_ENV_MARKER_PREFIX) or upper in _secret_source_bootstrap_env():
         return True
     if upper.startswith("AUXILIARY_") and upper.endswith(("_API_KEY", "_BASE_URL")):
         return True

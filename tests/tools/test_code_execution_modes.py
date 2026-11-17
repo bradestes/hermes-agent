@@ -93,7 +93,11 @@ print(json.dumps({{"env": {{k: os.environ.get(k) for k in {blocked + allowed!r}}
                   "recursive": hasattr(hermes_tools, "execute_code"),
                   "delegation": hasattr(hermes_tools, "delegate_task")}}))
 ''', mode, enabled_tools=("read_file", "execute_code", "delegate_task"))
-    assert result["env"] == {**dict.fromkeys(blocked), **{k: "fake-" + k for k in allowed}}
+    expected = {**dict.fromkeys(blocked), **{k: "fake-" + k for k in allowed}}
+    # Child profile identity is pinned to the active default home rather than trusting an
+    # arbitrary ambient HERMES_PROFILE label.
+    expected["HERMES_PROFILE"] = "default"
+    assert result["env"] == expected
     assert result["recursive"] is False
     assert result["delegation"] is False
 
@@ -115,6 +119,45 @@ def test_probe_retries_transient_failure_and_caches_success(helper, cache, faile
         assert run.call_count == 2
     finally:
         cache.clear()
+
+
+def test_code_execution_scrub_requires_passthrough_for_source_values_and_never_forwards_bws(monkeypatch):
+    from hermes_cli import env_loader
+    from tools import env_passthrough
+
+    supplied = {"HOME_REGION", "BWS_ACCESS_TOKEN"}
+    monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", supplied)
+    source = {"HOME_REGION": "vault-value", "BWS_ACCESS_TOKEN": "machine-token"}
+
+    assert ce._scrub_child_env(source, is_passthrough=lambda _name: False) == {}
+    assert ce._scrub_child_env(source, is_passthrough=lambda _name: True) == {"HOME_REGION": "vault-value"}
+
+    monkeypatch.setattr(
+        env_passthrough,
+        "scoped_passthrough_additions",
+        lambda _present: {"BWS_ACCESS_TOKEN": "machine-token"},
+    )
+    assert "BWS_ACCESS_TOKEN" not in ce._scrub_child_env({}, is_passthrough=lambda _name: True)
+
+
+def test_project_interpreter_probe_uses_scrubbed_environment(monkeypatch):
+    from hermes_cli import env_loader
+
+    supplied = {"HOME_REGION", "BWS_ACCESS_TOKEN"}
+    monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", supplied)
+    monkeypatch.setenv("HOME_REGION", "vault-value")
+    monkeypatch.setenv("BWS_ACCESS_TOKEN", "machine-token")
+    captured = {}
+
+    def fake_run(*_args, **kwargs):
+        captured.update(kwargs["env"])
+        return subprocess.CompletedProcess([], 0, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    ce._probe_python("project-python", "pass")
+
+    assert "HOME_REGION" not in captured
+    assert "BWS_ACCESS_TOKEN" not in captured
 
 
 @pytest.mark.parametrize("outcome", [

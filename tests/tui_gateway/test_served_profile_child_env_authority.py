@@ -102,3 +102,52 @@ def test_real_child_observes_only_the_routed_profile(homes):
     seen = json.loads(out.stdout.strip().splitlines()[-1])
     assert seen == {"HERMES_HOME": str(b), "A_MARKER": None, "B_MARKER": "b", "OPENAI_API_KEY": None}
     assert Path(seen["HERMES_HOME"]) == b
+
+
+def test_served_profile_credential_overlay_keeps_only_registered_provider_credentials(homes, monkeypatch):
+    from agent import secret_scope
+    from hermes_cli import env_loader
+
+    _a, b = homes
+    supplied = {"ACME_DEPLOY_CREDENTIAL", "BWS_ACCESS_TOKEN", "OPENAI_API_KEY"}
+    monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", supplied)
+    monkeypatch.setattr(
+        secret_scope,
+        "build_profile_secret_scope",
+        lambda _home: {
+            "ACME_DEPLOY_CREDENTIAL": "vault-value",
+            "BWS_ACCESS_TOKEN": "machine-token",
+            "OPENAI_API_KEY": "provider-value",
+        },
+    )
+
+    env = served_profile_child_env(base={}, target_home=b, inherit_credentials=True)
+
+    assert "ACME_DEPLOY_CREDENTIAL" not in env
+    assert "BWS_ACCESS_TOKEN" not in env
+    assert env["OPENAI_API_KEY"] == "provider-value"
+
+
+@pytest.mark.parametrize("routed", [False, True])
+def test_served_profile_raw_base_is_scrubbed_before_any_overlay(homes, monkeypatch, routed):
+    from hermes_cli import env_loader
+
+    a, b = homes
+    supplied = {"ACME_DEPLOY_CREDENTIAL", "BWS_ACCESS_TOKEN", "OPENAI_API_KEY"}
+    monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", supplied)
+    env = served_profile_child_env(
+        base={
+            "ACME_DEPLOY_CREDENTIAL": "vault-value",
+            "BWS_ACCESS_TOKEN": "machine-token",
+            "OPENAI_API_KEY": "provider-value",
+        },
+        target_home=b if routed else a,
+        inherit_credentials=True,
+    )
+
+    assert "ACME_DEPLOY_CREDENTIAL" not in env
+    assert "BWS_ACCESS_TOKEN" not in env
+    if routed:
+        assert "OPENAI_API_KEY" not in env
+    else:
+        assert env["OPENAI_API_KEY"] == "provider-value"
