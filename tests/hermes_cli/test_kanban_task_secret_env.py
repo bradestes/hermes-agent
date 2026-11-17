@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -49,6 +50,37 @@ def test_tool_child_restore_requires_dispatcher_ownership(monkeypatch):
 
     monkeypatch.delenv("HERMES_KANBAN_TASK")
     assert restore_task_secret_env_for_child({}) == {}
+
+
+def test_worker_profile_scope_hydrates_external_secrets_before_build(monkeypatch, tmp_path):
+    from agent.secret_scope import get_secret
+    from hermes_cli import env_loader
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "jonah"
+    profile.mkdir(parents=True)
+    root.joinpath("config.yaml").write_text("{}\n", encoding="utf-8")
+    profile.joinpath("config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    hydrated = []
+
+    def fake_hydrate(home):
+        hydrated.append(Path(home))
+        return {"CLOUDFLARE_ACCOUNT_ID_JONAH": "synthetic-account-id"}
+
+    monkeypatch.setattr(env_loader, "hydrate_profile_secret_sources", fake_hydrate)
+    monkeypatch.setattr(
+        env_loader,
+        "get_secret_source_values",
+        lambda home: ({"CLOUDFLARE_ACCOUNT_ID_JONAH": "synthetic-account-id"} if hydrated else {}),
+    )
+
+    with kbd._worker_profile_scope(str(profile)):
+        assert get_secret("CLOUDFLARE_ACCOUNT_ID_JONAH") == "synthetic-account-id"
+    assert hydrated == [profile]
 
 
 def test_default_spawn_maps_only_configured_task(monkeypatch, tmp_path):

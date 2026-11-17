@@ -2584,7 +2584,9 @@ def _worker_profile_scope(hermes_home: str):
     resolves for a standalone dispatcher.
     """
     from agent.runtime_scope import bind_profile_scope
-    with bind_profile_scope(hermes_home, hydrate_secrets=False):
+    # The detached dispatcher may not have served this profile yet. Hydrate its
+    # external sources before freezing the task's profile-scoped secret view.
+    with bind_profile_scope(hermes_home, hydrate_secrets=True):
         yield
 
 
