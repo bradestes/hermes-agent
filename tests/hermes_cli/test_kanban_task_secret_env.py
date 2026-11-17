@@ -27,7 +27,7 @@ def test_exact_task_mapping_is_value_free_and_rejects_broad_token(monkeypatch):
         assert inject_task_secret_env(env, "t_allowed", config) == ("TARGET_ID", "TARGET_TOKEN")
         assert env["TARGET_TOKEN"] == "synthetic-token"
         assert env["TARGET_ID"] == "synthetic-id"
-        assert env[TASK_SECRET_ENV_MARKER] == "TARGET_ID,TARGET_TOKEN"
+        assert env[TASK_SECRET_ENV_MARKER] == "TARGET_ID=SOURCE_ID,TARGET_TOKEN=SOURCE_TOKEN"
 
         with pytest.raises(ValueError, match="BWS_ACCESS_TOKEN"):
             inject_task_secret_env({}, "t_bad", config)
@@ -37,7 +37,10 @@ def test_exact_task_mapping_is_value_free_and_rejects_broad_token(monkeypatch):
 
 def test_tool_child_restore_requires_dispatcher_ownership(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_allowed")
-    monkeypatch.setenv(TASK_SECRET_ENV_MARKER, "TARGET_TOKEN,TARGET_ID,BWS_ACCESS_TOKEN")
+    monkeypatch.setenv(
+        TASK_SECRET_ENV_MARKER,
+        "TARGET_TOKEN=SOURCE_TOKEN,TARGET_ID=SOURCE_ID,BWS_ACCESS_TOKEN=SOURCE_TOKEN",
+    )
     monkeypatch.setenv("TARGET_TOKEN", "synthetic-token")
     monkeypatch.setenv("TARGET_ID", "synthetic-id")
     monkeypatch.setenv("BWS_ACCESS_TOKEN", "must-not-cross")
@@ -50,6 +53,20 @@ def test_tool_child_restore_requires_dispatcher_ownership(monkeypatch):
 
     monkeypatch.delenv("HERMES_KANBAN_TASK")
     assert restore_task_secret_env_for_child({}) == {}
+
+
+def test_tool_child_restore_recovers_source_after_worker_startup_scrubs_target(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes" / "profiles" / "jonah"
+    home.mkdir(parents=True)
+    home.joinpath(".env").write_text("SOURCE_TOKEN=synthetic-token\n", encoding="utf-8")
+    home.joinpath("config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_allowed")
+    monkeypatch.setenv(TASK_SECRET_ENV_MARKER, "TARGET_TOKEN=SOURCE_TOKEN")
+    monkeypatch.delenv("TARGET_TOKEN", raising=False)
+    monkeypatch.delenv("SOURCE_TOKEN", raising=False)
+
+    assert restore_task_secret_env_for_child({}) == {"TARGET_TOKEN": "synthetic-token"}
 
 
 def test_worker_profile_scope_hydrates_external_secrets_before_build(monkeypatch, tmp_path):
@@ -135,7 +152,7 @@ def test_default_spawn_maps_only_configured_task(monkeypatch, tmp_path):
     allowed = captured.pop()
     assert allowed["TARGET_TOKEN"] == "synthetic-token"
     assert allowed["TARGET_ID"] == "synthetic-id"
-    assert allowed[TASK_SECRET_ENV_MARKER] == "TARGET_ID,TARGET_TOKEN"
+    assert allowed[TASK_SECRET_ENV_MARKER] == "TARGET_ID=SOURCE_ID,TARGET_TOKEN=SOURCE_TOKEN"
     assert "SOURCE_TOKEN" not in allowed
     assert "SOURCE_ID" not in allowed
     assert "BWS_ACCESS_TOKEN" not in allowed

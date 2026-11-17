@@ -55,7 +55,7 @@ def inject_task_secret_env(env: dict[str, str], task_id: str, config: Mapping) -
         raise RuntimeError(
             f"task {task_id} is missing configured profile secrets: {', '.join(sorted(missing))}")
     targets = tuple(sorted(mapping))
-    env[TASK_SECRET_ENV_MARKER] = ",".join(targets)
+    env[TASK_SECRET_ENV_MARKER] = ",".join(f"{target}={mapping[target]}" for target in targets)
     return targets
 
 
@@ -63,19 +63,38 @@ def restore_task_secret_env_for_child(env: dict[str, str]) -> dict[str, str]:
     """Re-add allowlisted values only for this dispatcher-owned worker's tool child.
 
     Delegate children fail ``owned_kanban_task`` and therefore receive none.
-    The marker contains names only and is not copied into the child.
+    The marker pins target/source names only and is not copied into the child.
+    A worker startup may scrub a credential-shaped target after snapshotting its
+    external sources, so a missing target is recovered from the pinned source
+    inside the worker's own profile scope.
     """
     from agent.delegation_context import owned_kanban_task
 
     if not owned_kanban_task():
         return env
     raw = os.environ.get(TASK_SECRET_ENV_MARKER, "")
-    for name in raw.split(","):
-        name = name.strip()
-        if (not _ENV_NAME.fullmatch(name) or name == "BWS_ACCESS_TOKEN"
-                or name.startswith("HERMES_") or name.startswith("_HERMES_")):
+    pinned: list[tuple[str, str]] = []
+    for item in raw.split(","):
+        target, sep, source = item.strip().partition("=")
+        if (not sep or not _ENV_NAME.fullmatch(target) or not _ENV_NAME.fullmatch(source)
+                or target == "BWS_ACCESS_TOKEN" or source == "BWS_ACCESS_TOKEN"
+                or target.startswith("HERMES_") or target.startswith("_HERMES_")):
             continue
-        value = os.environ.get(name)
+        pinned.append((target, source))
+
+    scope = None
+    for target, source in pinned:
+        value = os.environ.get(target)
+        if value is None:
+            if scope is None:
+                from agent.secret_scope import build_profile_secret_scope
+                from hermes_cli.env_loader import hydrate_profile_secret_sources
+                from hermes_constants import get_hermes_home
+
+                home = get_hermes_home()
+                hydrate_profile_secret_sources(home)
+                scope = build_profile_secret_scope(home)
+            value = scope.get(source)
         if value is not None:
-            env[name] = value
+            env[target] = value
     return env
