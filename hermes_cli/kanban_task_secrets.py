@@ -70,15 +70,20 @@ def restore_task_secret_env_for_child(env: dict[str, str]) -> dict[str, str]:
     """
     from agent.delegation_context import owned_kanban_task
 
-    if not owned_kanban_task():
+    task_id = owned_kanban_task()
+    if not task_id:
         return env
+    from hermes_cli.config import load_config
+
+    configured = _validated_mapping(task_id, load_config())
     raw = os.environ.get(TASK_SECRET_ENV_MARKER, "")
     pinned: list[tuple[str, str]] = []
     for item in raw.split(","):
         target, sep, source = item.strip().partition("=")
         if (not sep or not _ENV_NAME.fullmatch(target) or not _ENV_NAME.fullmatch(source)
                 or target == "BWS_ACCESS_TOKEN" or source == "BWS_ACCESS_TOKEN"
-                or target.startswith("HERMES_") or target.startswith("_HERMES_")):
+                or target.startswith("HERMES_") or target.startswith("_HERMES_")
+                or configured.get(target) != source):
             continue
         pinned.append((target, source))
 

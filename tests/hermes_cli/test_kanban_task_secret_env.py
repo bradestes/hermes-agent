@@ -35,7 +35,18 @@ def test_exact_task_mapping_is_value_free_and_rejects_broad_token(monkeypatch):
         reset_secret_scope(token)
 
 
-def test_tool_child_restore_requires_dispatcher_ownership(monkeypatch):
+def test_tool_child_restore_requires_dispatcher_ownership(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes" / "profiles" / "jonah"
+    home.mkdir(parents=True)
+    home.joinpath("config.yaml").write_text(
+        "kanban:\n"
+        "  task_secret_env:\n"
+        "    t_allowed:\n"
+        "      TARGET_TOKEN: SOURCE_TOKEN\n"
+        "      TARGET_ID: SOURCE_ID\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_allowed")
     monkeypatch.setenv(
         TASK_SECRET_ENV_MARKER,
@@ -59,7 +70,13 @@ def test_tool_child_restore_recovers_source_after_worker_startup_scrubs_target(m
     home = tmp_path / ".hermes" / "profiles" / "jonah"
     home.mkdir(parents=True)
     home.joinpath(".env").write_text("SOURCE_TOKEN=synthetic-token\n", encoding="utf-8")
-    home.joinpath("config.yaml").write_text("{}\n", encoding="utf-8")
+    home.joinpath("config.yaml").write_text(
+        "kanban:\n"
+        "  task_secret_env:\n"
+        "    t_allowed:\n"
+        "      TARGET_TOKEN: SOURCE_TOKEN\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_allowed")
     monkeypatch.setenv(TASK_SECRET_ENV_MARKER, "TARGET_TOKEN=SOURCE_TOKEN")
@@ -67,6 +84,34 @@ def test_tool_child_restore_recovers_source_after_worker_startup_scrubs_target(m
     monkeypatch.delenv("SOURCE_TOKEN", raising=False)
 
     assert restore_task_secret_env_for_child({}) == {"TARGET_TOKEN": "synthetic-token"}
+
+
+def test_tool_child_restore_rejects_forged_or_other_task_marker(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes" / "profiles" / "jonah"
+    home.mkdir(parents=True)
+    home.joinpath(".env").write_text(
+        "SOURCE_TOKEN=synthetic-token\nOTHER_PROFILE_SECRET=must-not-cross\n",
+        encoding="utf-8",
+    )
+    home.joinpath("config.yaml").write_text(
+        "kanban:\n"
+        "  task_secret_env:\n"
+        "    t_allowed:\n"
+        "      TARGET_TOKEN: SOURCE_TOKEN\n"
+        "    t_other:\n"
+        "      OTHER_TARGET: OTHER_PROFILE_SECRET\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_allowed")
+    monkeypatch.setenv(
+        TASK_SECRET_ENV_MARKER,
+        "TARGET_TOKEN=OTHER_PROFILE_SECRET,OTHER_TARGET=OTHER_PROFILE_SECRET",
+    )
+    monkeypatch.delenv("TARGET_TOKEN", raising=False)
+    monkeypatch.delenv("OTHER_TARGET", raising=False)
+
+    assert restore_task_secret_env_for_child({}) == {}
 
 
 def test_worker_profile_scope_hydrates_external_secrets_before_build(monkeypatch, tmp_path):
