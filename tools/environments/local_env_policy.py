@@ -414,7 +414,9 @@ def _is_hermes_internal_secret(key: str) -> bool:
     no use for them, and ``served_profile_child_env`` puts back the ones whose value the child
     kept."""
     upper = key.upper()
-    if upper.startswith(BRIDGED_ENV_MARKER_PREFIX) or upper in _secret_source_bootstrap_env():
+    if (upper.startswith(BRIDGED_ENV_MARKER_PREFIX)
+            or upper in _secret_source_bootstrap_env()
+            or upper == "_HERMES_KANBAN_TASK_SECRET_ENV"):
         return True
     if upper.startswith("AUXILIARY_") and upper.endswith(("_API_KEY", "_BASE_URL")):
         return True

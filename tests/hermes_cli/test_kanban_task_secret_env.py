@@ -119,7 +119,7 @@ def test_local_terminal_snapshot_does_not_restore_task_lease_for_delegate(monkey
     try:
         with delegated_child_context("child"):
             result = terminal.execute(
-                "for v in TARGET_TOKEN TARGET_ID SOURCE_TOKEN SOURCE_ID; do "
+                "for v in TARGET_TOKEN TARGET_ID SOURCE_TOKEN SOURCE_ID _HERMES_KANBAN_TASK_SECRET_ENV; do "
                 "if [ -n \"$(printenv \"$v\" 2>/dev/null)\" ]; then "
                 "printf '%s=present\\n' \"$v\"; else printf '%s=absent\\n' \"$v\"; fi; done",
                 timeout=10,
@@ -130,7 +130,31 @@ def test_local_terminal_snapshot_does_not_restore_task_lease_for_delegate(monkey
             "TARGET_ID=absent",
             "SOURCE_TOKEN=absent",
             "SOURCE_ID=absent",
+            "_HERMES_KANBAN_TASK_SECRET_ENV=absent",
         ]
+    finally:
+        terminal.cleanup()
+
+
+def test_local_terminal_does_not_expose_task_secret_lease_marker(monkeypatch, tmp_path):
+    from tools.environments import local
+    from tools.environments.local import LocalEnvironment
+
+    monkeypatch.setattr(local, "_user_tools_first", lambda value: value)
+    monkeypatch.setattr(local, "_prepend_hermes_bin_dir", lambda value: value)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_allowed")
+    monkeypatch.setenv(TASK_SECRET_ENV_MARKER, "TARGET_TOKEN=SOURCE_TOKEN")
+    monkeypatch.setenv("TARGET_TOKEN", "synthetic-token")
+
+    terminal = LocalEnvironment(cwd=str(tmp_path), persistent=True)
+    try:
+        result = terminal.execute(
+            "if printenv _HERMES_KANBAN_TASK_SECRET_ENV >/dev/null 2>&1; then "
+            "printf 'marker=present\\n'; else printf 'marker=absent\\n'; fi",
+            timeout=10,
+        )
+        assert result["returncode"] == 0
+        assert result["output"].splitlines() == ["marker=absent"]
     finally:
         terminal.cleanup()
 
