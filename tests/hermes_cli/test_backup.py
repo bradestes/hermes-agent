@@ -1581,6 +1581,40 @@ class TestSafeCopyDb:
         assert _backup_error_category(FileNotFoundError()) == "FileNotFoundError"
         assert _backup_error_category(SyntheticMissing()) == "OSError"
 
+    def test_missing_sqlite_uri_is_reported_as_confirmed_file_not_found(self, tmp_path):
+        from hermes_cli.backup_sqlite import _safe_copy_db
+
+        categories = []
+        missing = tmp_path / "vanished.db"
+        assert _safe_copy_db(
+            missing,
+            tmp_path / "snapshot.db",
+            error_categories=categories,
+        ) is False
+        assert categories == ["FileNotFoundError"]
+
+    def test_actual_missing_sqlite_candidate_is_counted_as_vanished(self, tmp_path):
+        from hermes_cli.backup import _write_zip_entries
+
+        missing = tmp_path / "vanished.db"
+        archive = tmp_path / "backup.zip"
+        db_failures = []
+        errors = []
+        with zipfile.ZipFile(archive, "w") as zf:
+            result = _write_zip_entries(
+                zf,
+                [(missing, Path("vanished.db"))],
+                archive,
+                on_db_failure=db_failures.append,
+                on_error=lambda rel, exc: errors.append((rel, exc)),
+                on_progress=lambda _i: None,
+                track_bytes=False,
+            )
+
+        assert result == (0, 1, {})
+        assert db_failures == []
+        assert errors == []
+
     def test_copies_valid_database(self, tmp_path):
         from hermes_cli.backup import _safe_copy_db
         src = tmp_path / "test.db"

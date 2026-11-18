@@ -42,6 +42,17 @@ def _backup_error_category(exc: BaseException) -> str:
     return "OtherError"
 
 
+def _source_is_confirmed_absent(path: Path) -> bool:
+    """Recheck exact absence without treating another lookup failure as disappearance."""
+    try:
+        path.lstat()
+    except FileNotFoundError as exc:
+        return type(exc) is FileNotFoundError
+    except OSError:
+        return False
+    return False
+
+
 def _close_quietly(conn: Optional[sqlite3.Connection]) -> None:
     if conn is not None:
         with suppress(Exception):
@@ -215,7 +226,14 @@ def _safe_copy_db(
         return True
     except Exception as exc:
         if error_categories is not None:
-            error_categories.append(_backup_error_category(exc))
+            category = _backup_error_category(exc)
+            # sqlite3 reports a missing read-only URI as OperationalError rather
+            # than FileNotFoundError. Translate only after an independent exact
+            # lstat absence check so permission, corruption and subclasses remain
+            # fail-closed at the archive layer.
+            if category == "SQLiteOperationalError" and _source_is_confirmed_absent(src):
+                category = "FileNotFoundError"
+            error_categories.append(category)
         logger.warning("SQLite safe copy failed for %s: %s", src, exc)
         # Windows won't remove the partial destination while SQLite still has it open.
         _close_quietly(backup_conn)
