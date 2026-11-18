@@ -37,7 +37,7 @@ dependencies = [
   # extra and gets prepared through PM when the
   # user picks that backend. Smaller `dependencies` = smaller blast
   # radius for the next supply-chain attack.
-  "openai==2.54.0; python_version >= '3.14'",
+  "openai==3.55.0; python_version >= '3.14'",
   "certifi==2026.10.19; python_version >= '3.14'",
   # TLS trust comes from the OS certificate store (agent/ssl_verify.py), so
   # a corporate/internal root installed on the machine just works. certifi
@@ -696,9 +696,11 @@ override-dependencies = [
 # (#135589). Exact pins follow the same 3-day rule. The one exemption is CA
 # trust stores: a release that revokes or distrusts a compromised CA must reach
 # the lock the day it ships, because holding it back keeps the bad root trusted.
-# Only packages whose job is CA trust belong in exclude-newer-package.
+# Packages listed here have an explicit owner-authorized maintenance exception.
+# `certifi` is CA trust material; `openai` is pinned exactly to the separately
+# reviewed 3.55.0 SDK needed by Abe's DGC image backend.
 exclude-newer = "3 days"
-exclude-newer-package = { certifi = false }
+exclude-newer-package = { certifi = false, openai = false }
 
 [tool.setuptools]
 # Root single-file modules are derived by setup.py at build time from the
