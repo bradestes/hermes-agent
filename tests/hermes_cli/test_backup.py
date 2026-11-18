@@ -266,6 +266,27 @@ class TestIterBackupFiles:
         selected = {str(rel) for _, rel in _iter_backup_files(root, tmp_path / "out.zip")}
         assert {rel for rel in files if str(Path(rel)) in selected} == {rel for rel, keep in files.items() if keep}
 
+    def test_prunes_cdp_automation_chrome_profiles_at_home_roots_only(self, tmp_path):
+        from hermes_cli.backup import _iter_backup_files
+
+        root = tmp_path / ".hermes"
+        root.mkdir()
+        files = {
+            "automation-chrome-profile/Default/Login Data": False,
+            "automation-chrome-profile/Default/Network/Cookies": False,
+            "profiles/coder/automation-chrome-profile/Default/Cookies": False,
+            "skills/example/automation-chrome-profile/notes.md": True,
+        }
+        for rel in files:
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+
+        selected = {str(rel) for _, rel in _iter_backup_files(root, tmp_path / "out.zip")}
+        assert {rel for rel, keep in files.items() if keep} == {
+            rel for rel in files if str(Path(rel)) in selected
+        }
+
     def test_prunes_regenerable_caches_but_keeps_durable_and_nested(self, tmp_path):
         from hermes_cli.backup import _iter_backup_files
 
@@ -330,6 +351,135 @@ class TestIterBackupFiles:
 # ---------------------------------------------------------------------------
 
 class TestBackup:
+    def test_absence_recheck_rejects_file_not_found_subclasses(self, monkeypatch):
+        from hermes_cli.backup import _path_is_confirmed_absent
+
+        class SyntheticMissing(FileNotFoundError):
+            pass
+
+        monkeypatch.setattr(Path, "lstat", lambda _path: (_ for _ in ()).throw(
+            SyntheticMissing("synthetic subclass")))
+        assert _path_is_confirmed_absent(Path("unused")) is False
+
+    def test_sqlite_file_vanishing_after_scan_is_non_fatal(self, tmp_path, monkeypatch, capsys):
+        import hermes_cli.backup as backup_mod
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text("model: test\n")
+        volatile = home / "volatile.db"
+        volatile.write_bytes(b"not reached")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        def _vanish(source, destination, *, timeout_seconds=10.0, error_categories=None):
+            assert source == volatile
+            volatile.unlink()
+            if error_categories is not None:
+                error_categories.append("FileNotFoundError")
+            return False
+
+        monkeypatch.setattr(backup_mod, "_safe_copy_db", _vanish)
+        out_zip = tmp_path / "backup.zip"
+        assert backup_mod.run_backup(Namespace(output=str(out_zip))) is True
+        out = capsys.readouterr().out
+        assert "vanished after scan: 1" in out
+        assert "file(s) could not be added" not in out
+
+    def test_regular_file_vanishing_after_scan_is_non_fatal(self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text("model: test\n")
+        volatile = home / "volatile.json"
+        volatile.write_text("temporary\n")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        real_write = zipfile.ZipFile.write
+
+        def _remove_before_write(self, filename, *args, **kwargs):
+            if Path(filename) == volatile:
+                volatile.unlink()
+            return real_write(self, filename, *args, **kwargs)
+
+        monkeypatch.setattr(zipfile.ZipFile, "write", _remove_before_write)
+        from hermes_cli.backup import run_backup
+        assert run_backup(Namespace(output=str(tmp_path / "backup.zip"))) is True
+        out = capsys.readouterr().out
+        assert "vanished after scan: 1" in out
+        assert "file(s) could not be added" not in out
+
+    def test_file_not_found_for_existing_path_remains_fail_closed(self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text("model: test\n")
+        existing = home / "still-here.json"
+        existing.write_text("present\n")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        real_write = zipfile.ZipFile.write
+
+        def _synthetic_not_found(self, filename, *args, **kwargs):
+            if Path(filename) == existing:
+                raise FileNotFoundError("synthetic nested-path race")
+            return real_write(self, filename, *args, **kwargs)
+
+        monkeypatch.setattr(zipfile.ZipFile, "write", _synthetic_not_found)
+        from hermes_cli.backup import run_backup
+        assert run_backup(Namespace(output=str(tmp_path / "backup.zip"))) is False
+        out = capsys.readouterr().out
+        assert "FileNotFoundError: 1" in out
+        assert "vanished after scan" not in out
+
+    def test_file_not_found_subclass_remains_fail_closed_when_path_vanishes(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        class SyntheticMissing(FileNotFoundError):
+            pass
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text("model: test\n")
+        volatile = home / "volatile.json"
+        volatile.write_text("temporary\n")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        real_write = zipfile.ZipFile.write
+
+        def _subclass_failure(self, filename, *args, **kwargs):
+            if Path(filename) == volatile:
+                volatile.unlink()
+                raise SyntheticMissing("synthetic subclass")
+            return real_write(self, filename, *args, **kwargs)
+
+        monkeypatch.setattr(zipfile.ZipFile, "write", _subclass_failure)
+        from hermes_cli.backup import run_backup
+        assert run_backup(Namespace(output=str(tmp_path / "backup.zip"))) is False
+        out = capsys.readouterr().out
+        assert "OSError: 1" in out
+        assert "vanished after scan" not in out
+
+    def test_archive_error_categories_are_bounded_and_fail_closed(self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text("model: test\n")
+        unreadable = home / "unreadable.json"
+        unreadable.write_text("keep failing\n")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        real_write = zipfile.ZipFile.write
+
+        def _deny(self, filename, *args, **kwargs):
+            if Path(filename) == unreadable:
+                raise PermissionError("synthetic denial")
+            return real_write(self, filename, *args, **kwargs)
+
+        monkeypatch.setattr(zipfile.ZipFile, "write", _deny)
+        from hermes_cli.backup import run_backup
+        assert run_backup(Namespace(output=str(tmp_path / "backup.zip"))) is False
+        out = capsys.readouterr().out
+        assert "PermissionError: 1" in out
+        assert "vanished after scan" not in out
+
     def test_db_snapshots_staged_beside_output_zip(self, tmp_path, monkeypatch):
         """SQLite staging temp files must be created on the output zip's
         filesystem, NOT the system temporary-directory default — a
@@ -1422,6 +1572,15 @@ class TestProfileRestoration:
 # ---------------------------------------------------------------------------
 
 class TestSafeCopyDb:
+    def test_file_not_found_subclass_is_not_the_tolerated_category(self):
+        from hermes_cli.backup_sqlite import _backup_error_category
+
+        class SyntheticMissing(FileNotFoundError):
+            pass
+
+        assert _backup_error_category(FileNotFoundError()) == "FileNotFoundError"
+        assert _backup_error_category(SyntheticMissing()) == "OSError"
+
     def test_copies_valid_database(self, tmp_path):
         from hermes_cli.backup import _safe_copy_db
         src = tmp_path / "test.db"
@@ -1820,6 +1979,30 @@ def _fail_zip_write_after(monkeypatch, member: str, byte_count: int = 120_000) -
 
 
 class TestFailedZipMemberRecovery:
+    def test_automatic_backup_tolerates_confirmed_scan_to_write_disappearance(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text("model: test\n")
+        volatile = home / "volatile.json"
+        volatile.write_text("temporary\n")
+        archive = tmp_path / "automatic.zip"
+        real_write = zipfile.ZipFile.write
+
+        def _remove_before_write(self, filename, *args, **kwargs):
+            if Path(filename) == volatile:
+                volatile.unlink()
+            return real_write(self, filename, *args, **kwargs)
+
+        monkeypatch.setattr(zipfile.ZipFile, "write", _remove_before_write)
+        from hermes_cli.backup import _write_full_zip_backup
+        assert _write_full_zip_backup(archive, home) == archive
+        assert archive.exists()
+        assert not (tmp_path / "automatic.incomplete.zip").exists()
+        with zipfile.ZipFile(archive) as zf:
+            assert zf.namelist() == ["config.yaml"]
+
     def test_automatic_backup_omits_crc_valid_partial_member(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()

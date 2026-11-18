@@ -23,6 +23,25 @@ class _SQLiteBackupTimeout(RuntimeError):
     """Raised when a SQLite snapshot remains busy past its deadline."""
 
 
+def _backup_error_category(exc: BaseException) -> str:
+    """Map snapshot failures to fixed, path-free diagnostic categories."""
+    if isinstance(exc, _SQLiteBackupTimeout):
+        return "SQLiteBackupTimeout"
+    if type(exc) is FileNotFoundError:
+        return "FileNotFoundError"
+    if isinstance(exc, PermissionError):
+        return "PermissionError"
+    if isinstance(exc, sqlite3.OperationalError):
+        return "SQLiteOperationalError"
+    if isinstance(exc, sqlite3.DatabaseError):
+        return "SQLiteDatabaseError"
+    if isinstance(exc, OSError):
+        return "OSError"
+    if isinstance(exc, ValueError):
+        return "ValueError"
+    return "OtherError"
+
+
 def _close_quietly(conn: Optional[sqlite3.Connection]) -> None:
     if conn is not None:
         with suppress(Exception):
@@ -139,7 +158,13 @@ class _OffThreadCopy:
         return self.thread.is_alive()
 
 
-def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0) -> bool:
+def _safe_copy_db(
+    src: Path,
+    dst: Path,
+    *,
+    timeout_seconds: float = 10.0,
+    error_categories: Optional[list[str]] = None,
+) -> bool:
     """Copy a SQLite database with the backup() API (WAL-safe consistent snapshot).
 
     Fails closed when no consistent snapshot can be made: copying only the main file loses WAL data.
@@ -189,6 +214,8 @@ def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0) -> boo
             _stepped_rollback_journal_copy(conn, backup_conn, _check_backup_progress)
         return True
     except Exception as exc:
+        if error_categories is not None:
+            error_categories.append(_backup_error_category(exc))
         logger.warning("SQLite safe copy failed for %s: %s", src, exc)
         # Windows won't remove the partial destination while SQLite still has it open.
         _close_quietly(backup_conn)

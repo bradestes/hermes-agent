@@ -146,8 +146,11 @@ def test_served_profile_raw_base_is_scrubbed_before_any_overlay(homes, monkeypat
     )
 
     assert "ACME_DEPLOY_CREDENTIAL" not in env
-    assert "BWS_ACCESS_TOKEN" not in env
     if routed:
+        assert "BWS_ACCESS_TOKEN" not in env
         assert "OPENAI_API_KEY" not in env
     else:
+        # A credentialed child of the launch profile may retain the bootstrap
+        # token needed to authenticate that profile's own external secret source.
+        assert env["BWS_ACCESS_TOKEN"] == "machine-token"
         assert env["OPENAI_API_KEY"] == "provider-value"

@@ -103,7 +103,14 @@ _EXCLUDED_ROOT_DIRS = LOCAL_RUNTIME_ROOT_DIRS | (PM_RUNTIME_ROOT_DIRS - {"cache"
 # Browser Use CLI profile dir (browser.backend: browser-use): Chromium user-data with Login Data / Cookies;
 # the secret caches and Photon sidecar token. Root-scoped like models/ — a skill's own browser_profiles/ is
 # user data. Backup-only: do not fold into LOCAL_RUNTIME_ROOT_DIRS (clone-all identity contract).
-_EXCLUDED_BACKUP_ROOT_DIRS = frozenset({"browser_profiles", *SECRET_CACHE_FILES})
+_EXCLUDED_BACKUP_ROOT_DIRS = frozenset({
+    "browser_profiles",
+    # Hermes' CDP backend uses this root-level Chromium user-data directory. It is
+    # regenerable, may contain Cookies / Login Data, and contains Chrome-managed
+    # files that are unsafe to treat as portable backup content.
+    "automation-chrome-profile",
+    *SECRET_CACHE_FILES,
+})
 
 # ``cache/`` at those same roots mixes regenerable state (model/plugin catalogs, stamps, browser
 # profiles with locked SQLite, tool-output spill) with durable artifacts nothing can rebuild: media
@@ -462,6 +469,39 @@ def _discard_failed_zip_members(zf: zipfile.ZipFile, filelist_len: int) -> None:
     zf.NameToInfo.update((info.filename, info) for info in zf.filelist)
 
 
+def _path_is_confirmed_absent(path: Path) -> bool:
+    """Recheck path absence without treating another stat error as absence."""
+    try:
+        path.lstat()
+    except FileNotFoundError as exc:
+        return type(exc) is FileNotFoundError
+    except OSError:
+        return False
+    return False
+
+
+def _confirmed_vanished_after_scan(path: Path, exc: BaseException) -> bool:
+    """True only when an exact FileNotFoundError is confirmed by a second lookup."""
+    return type(exc) is FileNotFoundError and _path_is_confirmed_absent(path)
+
+
+def _archive_error_category(exc: BaseException) -> str:
+    """Map archive failures to fixed, path-free diagnostic categories."""
+    if type(exc) is FileNotFoundError:
+        return "FileNotFoundError"
+    if isinstance(exc, PermissionError):
+        return "PermissionError"
+    if isinstance(exc, OSError):
+        return "OSError"
+    if isinstance(exc, ValueError):
+        return "ValueError"
+    return "OtherError"
+
+
+def _count_error_category(categories: dict[str, int], category: str) -> None:
+    categories[category] = categories.get(category, 0) + 1
+
+
 def _write_zip_file(zf: zipfile.ZipFile, path: Path, arcname: str) -> None:
     """Write one member while keeping a failed partial write out of the central directory."""
     filelist_len = len(zf.filelist)
@@ -472,13 +512,20 @@ def _write_zip_file(zf: zipfile.ZipFile, path: Path, arcname: str) -> None:
         raise
 
 
-def _zip_sqlite_snapshot(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, out_path: Path) -> Optional[int]:
+def _zip_sqlite_snapshot(
+    zf: zipfile.ZipFile,
+    abs_path: Path,
+    rel_path: Path,
+    out_path: Path,
+    *,
+    error_categories: Optional[list[str]] = None,
+) -> Optional[int]:
     """Add a WAL-safe snapshot of *abs_path* to *zf*; return its byte size, or None on failure.
 
     Staged beside the output zip: /tmp may be a small tmpfs that cannot hold large databases.
     """
     with staged_backup_file(out_path.parent, "snapshot.db") as tmp_db:
-        if not _safe_copy_db(abs_path, tmp_db):
+        if not _safe_copy_db(abs_path, tmp_db, error_categories=error_categories):
             warn_legacy_backup_file(abs_path)
             return None
         _write_zip_file(zf, tmp_db, str(rel_path))
@@ -487,19 +534,29 @@ def _zip_sqlite_snapshot(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, ou
 
 def _write_zip_entries(
     zf: zipfile.ZipFile, files_to_add: list[tuple[Path, Path]], out_path: Path,
-    *, on_db_failure, on_error, on_progress, track_bytes: bool) -> int:
-    """Add every ``(abs_path, rel_path)`` to *zf*, WAL-safe for ``*.db``; return bytes archived.
+    *, on_db_failure, on_error, on_progress, track_bytes: bool,
+) -> tuple[int, int, dict[str, int]]:
+    """Add entries; return ``(bytes, confirmed_vanished, error_categories)``.
 
     ``on_db_failure(rel_path)`` runs when a SQLite snapshot fails (may raise to abort);
     ``on_error(rel_path, exc)`` records a read failure; ``on_progress(i)`` fires every 500 files;
     ``track_bytes`` stats plain files for the size total.
     """
     total_bytes = 0
+    vanished_after_scan = 0
+    error_categories: dict[str, int] = {}
     for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
         try:
             if abs_path.suffix == ".db":
-                size = _zip_sqlite_snapshot(zf, abs_path, rel_path, out_path)
+                sqlite_categories: list[str] = []
+                size = _zip_sqlite_snapshot(
+                    zf, abs_path, rel_path, out_path, error_categories=sqlite_categories)
                 if size is None:
+                    category = sqlite_categories[0] if len(sqlite_categories) == 1 else "SQLiteSafeCopyError"
+                    if category == "FileNotFoundError" and _path_is_confirmed_absent(abs_path):
+                        vanished_after_scan += 1
+                        continue
+                    _count_error_category(error_categories, category)
                     on_db_failure(rel_path)
                     continue
                 total_bytes += size
@@ -509,11 +566,15 @@ def _write_zip_entries(
                 if track_bytes:
                     total_bytes += abs_path.stat().st_size
         except (PermissionError, OSError, ValueError) as exc:
+            if _confirmed_vanished_after_scan(abs_path, exc):
+                vanished_after_scan += 1
+                continue
+            _count_error_category(error_categories, _archive_error_category(exc))
             on_error(rel_path, exc)
             continue
         if i % 500 == 0:
             on_progress(i)
-    return total_bytes
+    return total_bytes, vanished_after_scan, error_categories
 
 
 def _print_capped(header: str, lines: list[str], indent: str) -> None:
@@ -621,7 +682,7 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
 
     with _atomic_output_path(out_path) as archive_path, zipfile.ZipFile(
             archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        total_bytes = _write_zip_entries(
+        total_bytes, vanished_after_scan, error_categories = _write_zip_entries(
             zf, files_to_add, out_path, on_progress=_progress, track_bytes=True,
             on_db_failure=lambda rel: errors.append(f"{rel}: SQLite safe copy failed"),
             on_error=lambda rel, exc: errors.append(f"{rel}: {exc}"))
@@ -632,6 +693,10 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
                 _write_zip_file(zf, abs_path, arcname)
                 total_bytes += abs_path.stat().st_size
             except (PermissionError, OSError, ValueError) as exc:
+                if _confirmed_vanished_after_scan(abs_path, exc):
+                    vanished_after_scan += 1
+                    continue
+                _count_error_category(error_categories, _archive_error_category(exc))
                 errors.append(f"{arcname}: {exc}")
     elapsed = time.monotonic() - t0
     zip_size = out_path.stat().st_size
@@ -649,7 +714,12 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
               "(not portable):\n" + "\n".join(f"    {p}" for p in sorted(skipped_external)[:10]))
     if skipped_dirs:
         print("\n  Excluded directories:\n" + "\n".join(f"    {d}/" for d in sorted(skipped_dirs)))
+    if vanished_after_scan:
+        print(f"\n  vanished after scan: {vanished_after_scan}")
     if errors:
+        print("\n  Archive error categories:")
+        for category, count in sorted(error_categories.items()):
+            print(f"    {category}: {count}")
         _print_capped(f"\n  Archive kept, but {len(errors)} file(s) could not be added:", errors, "  ")
     else:
         print(f"\nRestore with: hermes import {out_path.name}")
@@ -2058,7 +2128,7 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path, extra: list
     try:
         with _atomic_output_path(out_path, _publish_path) as archive_path, zipfile.ZipFile(
                 archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            _write_zip_entries(
+            _, vanished_after_scan, error_categories = _write_zip_entries(
                 zf, files_to_add, out_path, on_db_failure=_db_failure, track_bytes=False,
                 on_error=lambda rel, exc: errors.append(f"{rel}: {exc}"),
                 on_progress=lambda i: logger.info(
@@ -2075,9 +2145,9 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path, extra: list
     if published != out_path:
         logger.warning(
             "automatic backup phase=archive status=incomplete duration_ms=%.1f files=%d errors=%d "
-            "bytes=%d salvage=%s skipped=%s",
+            "bytes=%d salvage=%s vanished_after_scan=%d error_categories=%s skipped=%s",
             (time.monotonic() - archive_started) * 1000, len(files_to_add), len(errors), zip_size,
-            salvage_path, _capped_errors())
+            salvage_path, vanished_after_scan, error_categories, _capped_errors())
         return None
 
     logger.info("automatic backup phase=archive status=complete duration_ms=%.1f files=%d bytes=%d",
